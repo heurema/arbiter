@@ -25,6 +25,8 @@ At least one provider CLI must be installed:
 /arbiter review                         → code review (codex)
 /arbiter review --via gemini            → code review (gemini)
 /arbiter review --base main             → PR review
+/arbiter review --commit abc123         → specific commit review
+/arbiter review "focus on SQL injection" → custom review instructions
 /arbiter ask "question"                 → ask codex
 /arbiter ask --via gemini "question"    → ask gemini
 /arbiter ask --with-diff "question"     → include git diff as context
