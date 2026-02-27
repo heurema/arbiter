@@ -8,7 +8,7 @@ Replaces [codex-partner](https://github.com/heurema/codex-partner) with multi-pr
 
 ```bash
 claude plugin marketplace add heurema/emporium
-claude plugin install arbiter
+claude plugin install arbiter@emporium
 ```
 
 ## Prerequisites
