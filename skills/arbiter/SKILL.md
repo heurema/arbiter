@@ -290,13 +290,13 @@ git branch -D "$BRANCH"
 
 **Purpose:** Ask BOTH providers the same question, compare answers.
 
-**IMPORTANT: Run codex and gemini in PARALLEL.** Issue both Bash tool calls in a single message — Claude Code supports multiple concurrent tool calls. This cuts panel latency in half. Claude forms its own analysis while waiting for results.
+**IMPORTANT: Run codex and gemini in TRUE PARALLEL using `run_in_background: true`.** Normal parallel Bash tool calls are serialized by Claude Code. Background execution is the only way to get real concurrency.
 
 **Flow:**
 1. Extract the question.
-2. Launch BOTH providers simultaneously — two Bash tool calls in one response:
+2. Launch BOTH providers as background tasks — two Bash tool calls with `run_in_background: true`:
 
-**Bash call 1 (codex):**
+**Bash call 1 (codex) — run_in_background: true:**
 ```bash
 OUT=$(mktemp)
 codex exec --ephemeral -C "$PWD" -p fast --output-last-message "$OUT" "<prompt>" 2>&1
@@ -304,7 +304,7 @@ echo "---CODEX_ANSWER---"
 cat "$OUT"; rm -f "$OUT"
 ```
 
-**Bash call 2 (gemini):**
+**Bash call 2 (gemini) — run_in_background: true:**
 ```bash
 ERR=$(mktemp)
 RESP=$(gemini -p "<prompt>" -o text 2>"$ERR")
@@ -321,7 +321,7 @@ echo "---GEMINI_ANSWER---"
 echo "$RESP"
 ```
 
-3. Collect both results. Form your own independent analysis.
+3. Collect both results using `TaskOutput` tool (block: true) for each background task ID. Form your own independent analysis.
 4. Present with voting structure:
 ```
 ## Panel: "<question>"
