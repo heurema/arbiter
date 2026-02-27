@@ -1,10 +1,11 @@
 ---
 name: arbiter
-description: >-
+description: >
   Use when user says "/arbiter", "/codex", "ask codex", "ask gemini",
   "codex review", "gemini review", "panel mode", "compare AIs",
   "second opinion from codex", "second opinion from gemini",
   or wants to delegate work to an external AI CLI (Codex, Gemini).
+  Arbiter dispatches to multiple providers and presents compared results.
 ---
 
 # Arbiter — Multi-AI Orchestrator
