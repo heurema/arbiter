@@ -290,25 +290,39 @@ git branch -D "$BRANCH"
 
 **Purpose:** Ask BOTH providers the same question, compare answers.
 
-Runs providers **sequentially** (not parallel — Claude Code executes one Bash at a time).
+**IMPORTANT: Run codex and gemini in PARALLEL.** Issue both Bash tool calls in a single message — Claude Code supports multiple concurrent tool calls. This cuts panel latency in half. Claude forms its own analysis while waiting for results.
 
 **Flow:**
 1. Extract the question.
-2. Run codex:
+2. Launch BOTH providers simultaneously — two Bash tool calls in one response:
+
+**Bash call 1 (codex):**
 ```bash
 OUT=$(mktemp)
 codex exec --ephemeral -C "$PWD" -p fast --output-last-message "$OUT" "<prompt>" 2>&1
-CODEX_ANSWER=$(cat "$OUT"); rm -f "$OUT"
+echo "---CODEX_ANSWER---"
+cat "$OUT"; rm -f "$OUT"
 ```
-3. Run gemini:
+
+**Bash call 2 (gemini):**
 ```bash
 ERR=$(mktemp)
-GEMINI_ANSWER=$(gemini -p "<prompt>" -o text 2>"$ERR")
-# error handling...
+RESP=$(gemini -p "<prompt>" -o text 2>"$ERR")
+EXIT=$?
+if [ $EXIT -ne 0 ]; then
+  if grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then
+    echo "GEMINI_ERROR: auth"
+  else
+    echo "GEMINI_ERROR: exit $EXIT"; cat "$ERR"
+  fi
+fi
 rm -f "$ERR"
+echo "---GEMINI_ANSWER---"
+echo "$RESP"
 ```
-4. Form your own independent analysis.
-5. Present with voting structure:
+
+3. Collect both results. Form your own independent analysis.
+4. Present with voting structure:
 ```
 ## Panel: "<question>"
 
