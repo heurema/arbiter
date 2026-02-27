@@ -6,10 +6,12 @@ Replaces [codex-partner](https://github.com/heurema/codex-partner) with multi-pr
 
 ## Installation
 
+<!-- INSTALL:START — auto-synced from emporium/INSTALL_REFERENCE.md -->
 ```bash
 claude plugin marketplace add heurema/emporium
 claude plugin install arbiter@emporium
 ```
+<!-- INSTALL:END -->
 
 ## Prerequisites
 
