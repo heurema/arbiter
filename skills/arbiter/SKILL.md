@@ -4,6 +4,7 @@ description: >
   Use when user says "/arbiter", "/codex", "ask codex", "ask gemini",
   "codex review", "gemini review", "panel mode", "compare AIs",
   "second opinion from codex", "second opinion from gemini",
+  "quorum", "go/no-go", "consensus vote",
   or wants to delegate work to an external AI CLI (Codex, Gemini).
   Arbiter dispatches to multiple providers and presents compared results.
 ---
@@ -27,6 +28,8 @@ description: >
 | implement | `codex exec --full-auto -C "<worktree>" "<spec>"` | `(cd "<worktree>" && gemini -p "<spec>" -y -o text)` | codex |
 | continue | Not supported in v1 | `gemini -r latest -p "<follow-up>" -o text` | gemini |
 
+**Note:** `quorum` is not in this table — it's a consensus protocol, not single-provider dispatch. Quorum always runs both providers (see [quorum mode](#quorum)).
+
 ### Capability Notes
 - **Codex** uses `-p` for profiles (fast, default, full). `-c model_reasoning_effort=high` for reasoning override.
 - **Gemini** uses `-o text` always (not `-o json` — that wraps in transport envelope). `-y` for auto-accept in implement.
@@ -47,6 +50,8 @@ description: >
 /arbiter implement "spec"                    → codex (default)
 /arbiter implement --via gemini "spec"       → gemini in yolo mode
 /arbiter panel "question"                    → ask BOTH providers, compare
+/arbiter quorum "question or proposal"       → 2-provider vote + Claude synthesis
+/arbiter quorum --with-diff "question"       → include git diff as context
 /arbiter continue "follow-up"               → gemini only (codex not supported in v1)
 /arbiter                                     → show help + provider status
 ```
@@ -55,17 +60,19 @@ description: >
 
 Parse the user's `/arbiter` invocation by matching these patterns in order:
 
-1. Extract mode: first word after `/arbiter` → `review|ask|implement|panel|continue`
-2. Extract `--via <provider>`: if present, set provider (codex|gemini)
+1. Extract mode: first word after `/arbiter` → `review|ask|implement|panel|quorum|continue`
+2. Extract `--via <provider>`: if present, set provider (codex|gemini). Not applicable to `quorum` (always both).
 3. Extract mode-specific flags:
    - review: `--base <branch>`, `--commit <sha>`
    - ask: `--with-diff`
+   - quorum: `--with-diff`
 4. Remaining quoted string → prompt/question/spec
 5. If no mode → show help
 
 **Conflict rules:**
 - `--base` + `--commit` → error: "Choose one: --base or --commit"
 - `--via unknown` → error: "Unknown provider. Available: codex, gemini"
+- `quorum --via <any>` → error: "Quorum always runs both providers. No --via flag."
 - `continue --via codex` → error: "Continue not supported for codex in v1. Use --via gemini."
 
 ## Modes
@@ -106,16 +113,8 @@ ERR=$(mktemp)
 RESP=$(git diff | gemini -p "You are a code reviewer. Review the diff on stdin. \
 Report ONLY: bugs, security issues, performance problems. Skip style. \
 Format: list each finding as '- [file:line] severity: description'" -o text 2>"$ERR")
-EXIT=$?
-if [ $EXIT -ne 0 ]; then
-  if grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then
-    echo "Gemini auth error. Run: gemini login"
-  else
-    echo "Gemini error (exit $EXIT):"; cat "$ERR"
-  fi
-  rm -f "$ERR"; exit 1
-fi
-rm -f "$ERR"
+# Standard Gemini error handling (see Error Handling §7) — exit 1 on failure
+
 
 # Large diff (>300 lines) — MUST chunk by file
 for FILE in $(git diff --name-only); do
@@ -183,24 +182,14 @@ ANSWER=$(cat "$OUT"); rm -f "$OUT"
 ```bash
 ERR=$(mktemp)
 RESP=$(gemini -p "<prompt>" -o text 2>"$ERR")
-EXIT=$?
-if [ $EXIT -ne 0 ]; then
-  if grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then
-    echo "Gemini auth error. Run: gemini login"
-  else
-    echo "Gemini error (exit $EXIT):"; cat "$ERR"
-  fi
-  rm -f "$ERR"; return 1
-fi
-rm -f "$ERR"
+# Standard Gemini error handling (see Error Handling §7) — return 1 on failure
 ```
 
 **Gemini with `--with-diff`:**
 ```bash
 ERR=$(mktemp)
 RESP=$(git diff | gemini -p "<prompt>" -o text 2>"$ERR")
-# Same error handling
-rm -f "$ERR"
+# Standard Gemini error handling (see Error Handling §7) — return 1 on failure
 ```
 
 3. Present BOTH perspectives:
@@ -308,15 +297,7 @@ cat "$OUT"; rm -f "$OUT"
 ```bash
 ERR=$(mktemp)
 RESP=$(gemini -p "<prompt>" -o text 2>"$ERR")
-EXIT=$?
-if [ $EXIT -ne 0 ]; then
-  if grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then
-    echo "GEMINI_ERROR: auth"
-  else
-    echo "GEMINI_ERROR: exit $EXIT"; cat "$ERR"
-  fi
-fi
-rm -f "$ERR"
+# Standard Gemini error handling (see Error Handling §7) — report GEMINI_ERROR on failure
 echo "---GEMINI_ANSWER---"
 echo "$RESP"
 ```
@@ -346,6 +327,139 @@ echo "$RESP"
 
 ---
 
+### quorum
+
+**Purpose:** Formal go/no-go gate for high-stakes decisions. Returns APPROVE/BLOCK/NEEDS_INFO.
+
+**When to use:** Architecture choices, schema migrations, destructive operations, security decisions. For open-ended questions, use `panel` instead.
+
+Quorum always runs both providers. No `--via` flag.
+
+#### Round 1 — Independent Assessment (Codex + Gemini, parallel)
+
+1. Build context:
+   - Always: the question/proposal text
+   - If `--with-diff`: prepend `git diff` output
+   - State snapshot: `git status --short` + `git log --oneline -3` (equalize context across providers)
+2. Contract prompt sent to BOTH providers:
+   ```
+   You are reviewing a proposal for a high-stakes decision.
+   Respond in EXACTLY this format (no other text):
+
+   VERDICT: APPROVE | BLOCK | NEEDS_INFO
+   BLOCKING_ISSUES: (numbered list or "none")
+   ASSUMPTIONS: (numbered list)
+   EVIDENCE_NEEDED: (what facts would change your verdict)
+   RATIONALE: (2-3 sentences)
+
+   Rules:
+   - BLOCK if: data loss risk, security vulnerability, irreversible without rollback
+   - NEEDS_INFO if: ambiguous, missing context, cannot evaluate
+   - APPROVE if: sound, safe, reversible or has rollback plan
+   ```
+3. Launch Codex + Gemini with `run_in_background: true` — same bash patterns as panel mode:
+
+**Bash call 1 (codex) — run_in_background: true:**
+```bash
+OUT=$(mktemp) || { echo "CODEX_ERROR: cannot create temp file"; exit 1; }
+CONTEXT=""
+# If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
+STATE="State:\n$(git status --short)\n$(git log --oneline -3)\n\n"
+PROMPT="${CONTEXT}${STATE}<contract_prompt>\n\n---\n\n<question>"
+echo "$PROMPT" | timeout 90 codex exec --ephemeral -C "$PWD" -p fast \
+  --output-last-message "$OUT" - 2>&1
+echo "---CODEX_ANSWER---"
+cat "$OUT"; rm -f "$OUT"
+```
+
+**Bash call 2 (gemini) — run_in_background: true:**
+```bash
+CONTEXT=""
+# If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
+STATE="State:\n$(git status --short)\n$(git log --oneline -3)\n\n"
+PROMPT="${CONTEXT}${STATE}<contract_prompt>\n\n---\n\n<question>"
+ERR=$(mktemp)
+RESP=$(timeout 90 gemini -p "$PROMPT" -o text 2>"$ERR")
+EXIT=$?
+# Standard Gemini error handling (see Error Handling §7)
+if [ $EXIT -ne 0 ]; then
+  if [ $EXIT -eq 124 ]; then echo "GEMINI_ERROR: TIMEOUT"
+  elif grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then echo "GEMINI_ERROR: auth"
+  else echo "GEMINI_ERROR: exit $EXIT"; cat "$ERR"
+  fi
+fi
+rm -f "$ERR"
+echo "---GEMINI_ANSWER---"
+echo "$RESP"
+```
+
+4. Collect both results using `TaskOutput` tool (block: true) for each background task ID.
+
+#### Parse Validation
+
+- If provider response doesn't contain `VERDICT:` line → mark as `PARSE_ERROR` (not APPROVE, not N/A)
+- If provider timed out (exit 124 or `TIMEOUT` marker) → mark as `TIMEOUT`
+- Minimum 1 valid external response required. If both failed → "Quorum unavailable — fewer than 1 external provider responded. Re-run or use /arbiter ask."
+
+#### Round 2 — Claude Synthesis
+
+Claude sees both responses and applies deterministic policy FIRST, then adds analysis.
+
+**Decision policy (deterministic, applied before LLM synthesis):**
+1. Both BLOCK → final BLOCK
+2. Both APPROVE → final APPROVE
+3. Both NEEDS_INFO → final NEEDS_INFO, consolidate questions
+4. One BLOCK + one APPROVE → **split decision, Claude = tiebreaker**
+5. Any BLOCK + NEEDS_INFO → final BLOCK (conservative)
+6. One APPROVE + NEEDS_INFO → final NEEDS_INFO
+7. One valid + one failed → present single result with degraded quorum warning
+
+**For split decisions (case 4) — Claude as tiebreaker:**
+Use adversarial prompt: "The providers disagree. Your job: first, state the strongest case FOR the BLOCK. Then state the strongest case AGAINST it. Only then give your tiebreaker verdict with rationale."
+This mitigates confirmation bias by forcing devil's advocate.
+
+#### Output Format
+
+```
+## Quorum: "<question>"
+
+### Votes
+
+| Provider | Verdict | Key Issue |
+|----------|---------|-----------|
+| Codex    | BLOCK   | SQL injection in query builder |
+| Gemini   | APPROVE | — |
+
+### Analysis
+
+[Claude's synthesis: why they disagree, strength of the BLOCK argument, missed risks]
+
+### Verdict: BLOCKED | APPROVED | NEEDS_INFO
+[Rationale based on deterministic policy + Claude analysis]
+
+### Action Items
+[If BLOCK: what to fix. If NEEDS_INFO: what to answer first]
+```
+
+#### Logging
+
+Append to `~/vicc/state/quorum-log.md` conditionally (if dir exists):
+```bash
+if [ -d ~/vicc/state ]; then
+cat >> ~/vicc/state/quorum-log.md << EOF
+
+## <timestamp>
+
+**Question:** <first 3 lines>
+**Result:** BLOCKED (1 BLOCK, 1 APPROVE — tiebreaker: Claude → BLOCK)
+**Votes:** Codex=BLOCK Gemini=APPROVE
+**Source:** arbiter quorum
+EOF
+fi
+```
+
+---
+
 ### continue
 
 **Purpose:** Resume the last Gemini session with a follow-up.
@@ -359,16 +473,7 @@ Codex `continue` is NOT supported in v1 (`codex exec resume --last` lacks `--out
 ```bash
 ERR=$(mktemp)
 RESP=$(gemini -r latest -p "<follow-up>" -o text 2>"$ERR")
-EXIT=$?
-if [ $EXIT -ne 0 ]; then
-  if grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then
-    echo "Gemini auth error. Run: gemini login"
-  else
-    echo "Gemini error (exit $EXIT):"; cat "$ERR"
-  fi
-  rm -f "$ERR"; return 1
-fi
-rm -f "$ERR"
+# Standard Gemini error handling (see Error Handling §7) — return 1 on failure
 ```
 Note: Gemini sessions are CWD-scoped.
 
@@ -390,6 +495,7 @@ Modes:
   ask         Ask a question (default: codex)
   implement   Delegate implementation (default: codex)
   panel       Ask all providers, compare
+  quorum      Formal go/no-go verdict (high-stakes only)
   continue    Resume last session (gemini only)
 
 Usage: /arbiter <mode> [--via codex|gemini] [--base <branch>] [args]
@@ -401,6 +507,8 @@ Examples:
   /arbiter ask --via gemini --with-diff "is this thread-safe?"
   /arbiter panel "best testing strategy for this module?"
   /arbiter implement --via gemini "add input validation"
+  /arbiter quorum "should I drop the users table and recreate?"
+  /arbiter quorum --with-diff "are these migration changes safe?"
 ```
 
 Provider status: run `which codex && codex --version` / `which gemini && gemini --version`. Show checkmark if found, cross if missing.
@@ -422,8 +530,25 @@ Before every provider call, show the effective command:
 4. **No changes for review** → check `git diff --stat` first, stop early.
 5. **Large diff** → if >300 lines, MUST chunk by file for gemini (codex handles natively).
 6. **Not in git repo** → check before review/implement modes, stop with message.
-7. **Gemini stderr noise** → always capture to tempfile, parse for errors, discard noise.
+7. **Gemini stderr noise** → always capture stderr to tempfile (`ERR=$(mktemp)`), check for auth keywords, discard noise. Standard pattern:
+   ```bash
+   ERR=$(mktemp)
+   RESP=$(... 2>"$ERR")
+   EXIT=$?
+   if [ $EXIT -ne 0 ]; then
+     if grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then
+       echo "Gemini auth error. Run: gemini login"
+     else
+       echo "Gemini error (exit $EXIT):"; cat "$ERR"
+     fi
+     rm -f "$ERR"; return 1
+   fi
+   rm -f "$ERR"
+   ```
+   All Gemini calls in every mode MUST use this pattern. Adapt `return 1` / `exit 1` to context.
 8. **Orphan worktrees** → on error during implement, always clean up. Note: `git worktree list | grep arbiter/` for manual cleanup.
+9. **Quorum parse failure** → if provider response lacks `VERDICT:` line, mark as PARSE_ERROR. Do not count as a vote.
+10. **Quorum degraded** → if only 1 of 2 providers responded, warn user: "Degraded quorum (1/2 providers)."
 
 ## Backward Compatibility
 
@@ -440,3 +565,6 @@ If triggered via `/codex` (old trigger), handle normally — arbiter processes t
 7. **Panel: partial failure OK** — if one provider fails, report failure + show others.
 8. **Codex review = text** — always parse as plain text, never expect JSON.
 9. **Gemini stderr = tempfile** — never `2>/dev/null` blindly, always check for auth errors first.
+10. **Quorum: Claude does NOT vote** — only Codex and Gemini vote. Claude moderates and breaks ties.
+11. **Quorum: deterministic policy first** — apply decision rules before LLM synthesis. Never override a clear BLOCK without evidence.
+12. **Quorum: minimum 1 external** — if both providers fail, abort with error. Never produce a quorum from 0 external votes.
