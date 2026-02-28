@@ -357,7 +357,7 @@ Quorum always runs both providers. No `--via` flag.
    - NEEDS_INFO if: ambiguous, missing context, cannot evaluate
    - APPROVE if: sound, safe, reversible or has rollback plan
    ```
-3. Launch Codex + Gemini with `run_in_background: true` — same bash patterns as panel mode:
+3. Launch Codex + Gemini with `run_in_background: true` (Bash tool `timeout: 120000`) — same patterns as panel mode:
 
 **Bash call 1 (codex) — run_in_background: true:**
 ```bash
@@ -366,7 +366,7 @@ CONTEXT=""
 # If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
 STATE="State:\n$(git status --short)\n$(git log --oneline -3)\n\n"
 PROMPT="${CONTEXT}${STATE}<contract_prompt>\n\n---\n\n<question>"
-echo "$PROMPT" | timeout 90 codex exec --ephemeral -C "$PWD" -p fast \
+echo "$PROMPT" | codex exec --ephemeral -C "$PWD" -p fast \
   --output-last-message "$OUT" - 2>&1
 echo "---CODEX_ANSWER---"
 cat "$OUT"; rm -f "$OUT"
@@ -379,12 +379,11 @@ CONTEXT=""
 STATE="State:\n$(git status --short)\n$(git log --oneline -3)\n\n"
 PROMPT="${CONTEXT}${STATE}<contract_prompt>\n\n---\n\n<question>"
 ERR=$(mktemp)
-RESP=$(timeout 90 gemini -p "$PROMPT" -o text 2>"$ERR")
+RESP=$(gemini -p "$PROMPT" -o text 2>"$ERR")
 EXIT=$?
 # Standard Gemini error handling (see Error Handling §7)
 if [ $EXIT -ne 0 ]; then
-  if [ $EXIT -eq 124 ]; then echo "GEMINI_ERROR: TIMEOUT"
-  elif grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then echo "GEMINI_ERROR: auth"
+  if grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then echo "GEMINI_ERROR: auth"
   else echo "GEMINI_ERROR: exit $EXIT"; cat "$ERR"
   fi
 fi
@@ -398,7 +397,7 @@ echo "$RESP"
 #### Parse Validation
 
 - If provider response doesn't contain `VERDICT:` line → mark as `PARSE_ERROR` (not APPROVE, not N/A)
-- If provider timed out (exit 124 or `TIMEOUT` marker) → mark as `TIMEOUT`
+- If Bash tool timed out → mark as `TIMEOUT`
 - Minimum 1 valid external response required. If both failed → "Quorum unavailable — fewer than 1 external provider responded. Re-run or use /arbiter ask."
 
 #### Round 2 — Claude Synthesis
