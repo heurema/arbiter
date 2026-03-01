@@ -29,6 +29,7 @@ description: >
 | implement | `codex exec --full-auto -C "<worktree>" "<spec>"` | `(cd "<worktree>" && gemini -p "<spec>" -y -o text)` | codex |
 | continue | Not supported in v1 | `gemini -r latest -p "<follow-up>" -o text` | gemini |
 | diverge | 3 worktrees + codex/gemini | 3 worktrees + codex/gemini | all |
+| doctor | N/A | N/A | N/A |
 
 **Note:** `quorum` and `verify` are not in this table — they are multi-provider protocols, not single-provider dispatch. Quorum always runs both providers (see [quorum mode](#quorum)). Verify always runs both providers (see [verify mode](#verify)).
 
@@ -64,13 +65,14 @@ description: >
 /arbiter diverge --providers "claude,codex"      → specific providers
 /arbiter diverge --timeout 600 "spec"           → custom timeout (default: 300s)
 /arbiter diverge --run-tests "spec"             → test all 3 before evaluation
+/arbiter doctor                              → health check (binary + smoke API)
 ```
 
 ## Input Parsing
 
 Parse the user's `/arbiter` invocation by matching these patterns in order:
 
-1. Extract mode: first word after `/arbiter` → `review|ask|implement|panel|quorum|verify|continue|diverge`
+1. Extract mode: first word after `/arbiter` → `review|ask|implement|panel|quorum|verify|continue|diverge|doctor`
 2. Extract `--via <provider>`: if present, set provider (codex|gemini). Not applicable to `quorum` (always both).
 3. Extract mode-specific flags:
    - review: `--base <branch>`, `--commit <sha>`
@@ -298,6 +300,7 @@ git branch -D "$BRANCH"
 
 **Flow:**
 1. Extract the question.
+1a. After collecting all provider results, compute and show Run Summary (see [Run Summary](#run-summary)). On FAILURE → stop with "All providers failed. Cannot form panel."
 2. Launch BOTH providers as background tasks — two Bash tool calls with `run_in_background: true`:
 
 **Bash call 1 (codex) — run_in_background: true:**
@@ -407,7 +410,7 @@ echo "---GEMINI_ANSWER---"
 echo "$RESP"
 ```
 
-4. Collect both results using `TaskOutput` tool (block: true) for each background task ID.
+4. Collect both results using `TaskOutput` tool (block: true) for each background task ID. Show Run Summary (see [Run Summary](#run-summary)) before presenting quorum results. PARTIAL_SUCCESS handling subsumes the degraded quorum warning (Error #10).
 
 #### Parse Validation
 
@@ -516,7 +519,7 @@ echo "---GEMINI_ANSWER---"
 echo "$RESP"
 ```
 
-Collect both results using `TaskOutput` tool (block: true) for each background task ID.
+Collect both results using `TaskOutput` tool (block: true) for each background task ID. Show Run Summary (see [Run Summary](#run-summary)) before presenting verify results.
 
 #### Round 2 — Claim Decomposition & Comparison (Claude)
 
@@ -660,6 +663,78 @@ RESP=$(gemini -r latest -p "<follow-up>" -o text 2>"$ERR")
 Note: Gemini sessions are CWD-scoped.
 
 4. Present the response and your own commentary.
+
+---
+
+### doctor
+
+**Purpose:** Health check — verify all providers are available and authenticated.
+
+**Flow:**
+1. **Binary checks** (parallel):
+```bash
+CODEX_BIN=$(which codex 2>/dev/null) && CODEX_VER=$(codex --version 2>&1 | head -1)
+GEMINI_BIN=$(which gemini 2>/dev/null) && GEMINI_VER=$(gemini --version 2>&1 | head -1)
+```
+
+2. **Smoke API tests** (parallel, background — two Bash calls with `run_in_background: true`):
+
+Codex:
+```bash
+OUT=$(mktemp); ERR=$(mktemp)
+START=$(date +%s)
+timeout 30 codex exec --ephemeral -p fast \
+  --output-last-message "$OUT" "Reply with exactly: ARBITER_HEALTH_OK" 2>"$ERR"
+CODEX_API_EXIT=$?
+CODEX_LATENCY=$(( $(date +%s) - START ))
+CODEX_API_RESP=$(cat "$OUT"); rm -f "$OUT" "$ERR"
+```
+
+Gemini:
+```bash
+ERR=$(mktemp)
+START=$(date +%s)
+GEMINI_API_RESP=$(timeout 30 gemini -p "Reply with exactly: ARBITER_HEALTH_OK" -o text 2>"$ERR")
+GEMINI_API_EXIT=$?
+GEMINI_LATENCY=$(( $(date +%s) - START ))
+if [ $GEMINI_API_EXIT -ne 0 ]; then
+  if grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then
+    GEMINI_API_STATUS="auth_expired"
+  else
+    GEMINI_API_STATUS="error"
+  fi
+else
+  GEMINI_API_STATUS="ok"
+fi
+rm -f "$ERR"
+```
+
+3. **Determine per-provider status:**
+   - Binary missing → `missing` (suggest install URL)
+   - Binary found, API timeout → `timeout`
+   - Binary found, API auth error → `auth_expired` (suggest `codex auth` / `gemini login`)
+   - Binary found, API other error → `error`
+   - Binary found, API ok → `healthy`
+
+4. **Output:**
+```
+Arbiter Doctor — Health Check
+
+| Provider | Binary     | Version | API    | Latency |
+|----------|------------|---------|--------|---------|
+| Claude   | ✓ built-in | —       | ✓ ok   | —       |
+| Codex    | ✓ found    | 0.104   | ✓ ok   | 2.3s    |
+| Gemini   | ✓ found    | 0.30    | ✗ auth | —       |
+
+Issues:
+- Gemini: auth expired. Run: gemini login
+
+Overall: PARTIAL (2/3 providers healthy)
+```
+
+If all healthy: "All providers healthy. Ready to orchestrate."
+If issues: list each with actionable fix (install URL or auth command).
+If both missing: "No external providers found. Install codex or gemini to use multi-provider modes."
 
 ---
 
@@ -938,6 +1013,8 @@ fi
 
 Collect all results using `TaskOutput` tool (block: true) for each background task ID.
 
+Show Run Summary after collecting all dispatch results (see [Run Summary](#run-summary)). On PARTIAL_SUCCESS → redistribute failed provider's strategy or evaluate with fewer solutions. On FAILURE → Error #13 applies.
+
 #### 7. Staged Evaluation
 
 **Problem:** 3 full diffs simultaneously can overflow the evaluator's context (e.g., 3 × 50KB = 150k+ tokens). **Solution:** Two-pass evaluation.
@@ -1171,6 +1248,43 @@ Output: side-by-side comparison of 3 designs → user picks one.
 
 ---
 
+## Run Summary
+
+All multi-provider modes (panel, quorum, verify, diverge) MUST show a Run Summary at the top of their output.
+
+### Format
+
+```markdown
+## Run Summary
+| Provider | Status | Time |
+|----------|--------|------|
+| Claude   | ok     | 3.2s |
+| Codex    | ok     | 8.1s |
+| Gemini   | timeout| 120s |
+
+Overall: PARTIAL_SUCCESS (2/3 providers)
+⚠ Gemini timed out after 120s. Results below are from Claude + Codex only.
+```
+
+### Provider Status Values
+
+`ok`, `timeout`, `error`, `auth_expired`, `abstain`
+
+### Overall Status (deterministic — computed, not LLM-decided)
+
+- **SUCCESS** — all providers returned `ok`
+- **PARTIAL_SUCCESS** — ≥1 `ok` AND ≥1 non-ok
+- **FAILURE** — zero `ok` providers
+
+### Behavior
+
+- `SUCCESS` → proceed normally
+- `PARTIAL_SUCCESS` → proceed with available results + show warning listing failed providers and reasons
+- `FAILURE` → STOP. Show errors. Suggest fallback:
+  - panel/verify → "Try `/arbiter ask` with a single provider"
+  - quorum → "Cannot form quorum from 0 external votes"
+  - diverge → "Try `/arbiter implement` instead"
+
 ## Help
 
 When invoked without arguments (`/arbiter`), show:
@@ -1191,6 +1305,7 @@ Modes:
   verify      Cross-verification with claim decomposition
   continue    Resume last session (gemini only)
   diverge     3 independent solutions, compare & select
+  doctor      Health check all providers
 
 Usage: /arbiter <mode> [--via codex|gemini] [--base <branch>] [args]
 
@@ -1208,6 +1323,7 @@ Examples:
   /arbiter diverge "implement caching layer"
   /arbiter diverge --lite "redesign auth module"
   /arbiter diverge --run-tests "add input validation"
+  /arbiter doctor
 ```
 
 Provider status: run `which codex && codex --version` / `which gemini && gemini --version`. Show checkmark if found, cross if missing.
@@ -1273,3 +1389,4 @@ If triggered via `/codex` (old trigger), handle normally — arbiter processes t
 11. **Quorum: deterministic policy first** — apply decision rules before LLM synthesis. Never override a clear BLOCK without evidence.
 12. **Quorum: minimum 1 external** — if both providers fail, abort with error. Never produce a quorum from 0 external votes.
 13. **Diverge: no commits.** Agents do not commit. All changes stay uncommitted in worktrees. Diff against base_commit.
+14. **Run Summary: always show for multi-provider modes.** Compute overall status deterministically (SUCCESS/PARTIAL_SUCCESS/FAILURE). Never skip the summary.
