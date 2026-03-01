@@ -28,6 +28,7 @@ description: >
 | review | `codex review [flags]` | `git diff \| gemini -p "<review_prompt>" -o text` | codex |
 | implement | `codex exec --full-auto -C "<worktree>" "<spec>"` | `(cd "<worktree>" && gemini -p "<spec>" -y -o text)` | codex |
 | continue | Not supported in v1 | `gemini -r latest -p "<follow-up>" -o text` | gemini |
+| diverge | 3 worktrees + codex/gemini | 3 worktrees + codex/gemini | all |
 
 **Note:** `quorum` and `verify` are not in this table — they are multi-provider protocols, not single-provider dispatch. Quorum always runs both providers (see [quorum mode](#quorum)). Verify always runs both providers (see [verify mode](#verify)).
 
@@ -57,19 +58,26 @@ description: >
 /arbiter verify --with-diff "question"       → include git diff as context
 /arbiter continue "follow-up"               → gemini only (codex not supported in v1)
 /arbiter                                     → show help + provider status
+/arbiter diverge "spec"                        → 3 providers, default strategies
+/arbiter diverge --lite "spec"                  → design-level only, no code
+/arbiter diverge --strategies "a,b,c" "spec"    → custom strategy hints
+/arbiter diverge --providers "claude,codex"      → specific providers
+/arbiter diverge --timeout 600 "spec"           → custom timeout (default: 300s)
+/arbiter diverge --run-tests "spec"             → test all 3 before evaluation
 ```
 
 ## Input Parsing
 
 Parse the user's `/arbiter` invocation by matching these patterns in order:
 
-1. Extract mode: first word after `/arbiter` → `review|ask|implement|panel|quorum|verify|continue`
+1. Extract mode: first word after `/arbiter` → `review|ask|implement|panel|quorum|verify|continue|diverge`
 2. Extract `--via <provider>`: if present, set provider (codex|gemini). Not applicable to `quorum` (always both).
 3. Extract mode-specific flags:
    - review: `--base <branch>`, `--commit <sha>`
    - ask: `--with-diff`
    - quorum: `--with-diff`
    - verify: `--with-diff`
+   - diverge: `--lite`, `--strategies <csv>`, `--providers <csv>`, `--timeout <seconds>`, `--run-tests`
 4. Remaining quoted string → prompt/question/spec
 5. If no mode → show help
 
@@ -79,6 +87,8 @@ Parse the user's `/arbiter` invocation by matching these patterns in order:
 - `quorum --via <any>` → error: "Quorum always runs both providers. No --via flag."
 - `verify --via <any>` → error: "Verify always runs both providers. No --via flag."
 - `continue --via codex` → error: "Continue not supported for codex in v1. Use --via gemini."
+- `diverge --providers` with only 1 provider → warn: "Only 1 provider. Results will show 3 strategies from 1 model."
+- `diverge --lite --run-tests` → error: "Cannot run tests in lite mode (no code)."
 
 ## Modes
 
@@ -651,6 +661,516 @@ Note: Gemini sessions are CWD-scoped.
 
 4. Present the response and your own commentary.
 
+---
+
+### diverge
+
+**Purpose:** Generate 3 independent implementations in isolated worktrees using different models and strategy hints, then compare and select the best solution. Use when a non-trivial spec has multiple valid approaches and you want to explore the solution space in parallel before committing.
+
+**All three agents run as background tasks for true parallelism.**
+
+**Flow summary:**
+1. Preflight (clean tree check)
+2. Freeze spec + context into a Problem Pack
+3. Create 3 isolated worktrees (detached, run-scoped)
+4. Write prompt files per worktree (with strategy hints)
+5. Dispatch Claude (sonnet subagent), Codex, and Gemini in parallel
+6. Staged evaluation: Pass 1 (stats + cards), Pass 2 (full diff on demand)
+7. Decision Matrix via separate anonymized evaluator
+8. User selects → merge only the chosen solution
+
+#### 0. Budget Guard
+
+Before starting, check whether diverge is warranted:
+
+```
+Trivial heuristic: spec < 50 words AND no architecture keywords AND context_files < 2
+```
+
+If ALL three conditions are true → warn:
+```
+> This spec looks straightforward. Diverge costs 4-6× a normal implement.
+> Proceed? (yes / switch to implement)
+```
+
+If ANY condition is false, skip the warning and proceed.
+
+#### 1. Preflight
+
+Verify the working tree is clean:
+
+```bash
+if [ -n "$(git status --porcelain)" ]; then
+  echo "ERROR: Working tree has uncommitted changes."
+  echo "Diverge requires a clean tree so all worktrees start from identical state."
+  echo "Options: stash / commit / abort"
+fi
+```
+
+- "stash" → `git stash push -m "diverge: pre-run stash"`, proceed
+- "commit" → ask user to commit first, then re-run
+- "abort" → stop
+
+Then prune stale worktree registrations from prior crashes:
+
+```bash
+git worktree prune
+```
+
+#### 2. Problem Pack (Input Freezing)
+
+Freeze all inputs into a single immutable artifact stored outside the repo:
+
+```bash
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+BASE_COMMIT="$(git rev-parse HEAD)"
+RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/arbiter-diverge.XXXXXX")"
+chmod 700 "$RUN_DIR"  # secure: owner-only access
+```
+
+Write `$RUN_DIR/diverge-pack.json`:
+
+```json
+{
+  "run_id": "20260301T100000Z-12345",
+  "spec": "user's implementation spec (verbatim)",
+  "context_files": ["list of files read for context"],
+  "context_contents": {"path/to/file.py": "frozen file content..."},
+  "constraints": "extracted from exploration.md if in sigil flow",
+  "base_commit": "abc123def",
+  "strategies": ["minimal", "refactor", "redesign"],
+  "providers": ["claude", "codex", "gemini"],
+  "timeout_seconds": 300,
+  "lite": false,
+  "created_at": "2026-03-01T10:00:00Z"
+}
+```
+
+Copy the pack into each worktree after creation (untracked files are not inherited by worktrees):
+
+```bash
+for LABEL in A B C; do
+  mkdir -p "${WT[$LABEL]}/.dev"
+  cp "$RUN_DIR/diverge-pack.json" "${WT[$LABEL]}/.dev/diverge-pack.json"
+done
+```
+
+#### 3. Strategy Hints
+
+**Default strategy set** (rotate across providers to avoid provider-strategy bias):
+
+| Strategy | Hint injected into prompt | Default Provider |
+|----------|--------------------------|-----------------|
+| `minimal` | "Solve with the smallest possible change. Minimize lines changed, new files, and new dependencies. Patch, don't rebuild." | Claude (sonnet) |
+| `refactor` | "Solve by improving the existing code structure. Extract helpers, rename for clarity, improve testability. Moderate change size OK." | Codex (GPT) |
+| `redesign` | "Solve with the best possible abstraction. You may introduce new modules, patterns, or interfaces if justified. Optimize for long-term maintainability." | Gemini |
+
+**Custom strategies** (`--strategies "a,b,c"`): injected verbatim as hint text. If fewer than 3 → pad with defaults. If more than 3 → use first 3.
+
+**Provider redistribution:** if a provider is unavailable, redistribute its strategy to an available provider as a second run in a separate worktree. Example: no Gemini → Claude gets `minimal` + `redesign` in two worktrees.
+
+#### 4. Worktree Creation
+
+Worktrees are detached (no branch created upfront — branch is only created for the selected solution at merge time):
+
+```bash
+declare -A WT
+for LABEL in A B C; do
+  WT[$LABEL]="$RUN_DIR/$LABEL"
+  git worktree add --detach "${WT[$LABEL]}" "$BASE_COMMIT"
+done
+```
+
+**Cleanup (trap on exit):**
+
+```bash
+cleanup_diverge() {
+  for LABEL in A B C; do
+    if [ -d "${WT[$LABEL]}" ]; then
+      git worktree remove --force "${WT[$LABEL]}" 2>/dev/null
+    fi
+  done
+  rm -rf "$RUN_DIR"
+}
+trap cleanup_diverge EXIT
+```
+
+On any error, remind user: `git worktree list | grep arbiter-diverge` for manual cleanup.
+
+#### 5. Prompt File Generation
+
+Write a prompt file to each worktree (avoids OS argument length limits and shell quoting issues):
+
+```bash
+for LABEL in A B C; do
+  STRATEGY="${STRATEGIES[$LABEL]}"
+  cat > "${WT[$LABEL]}/.dev/diverge-prompt.md" <<PROMPT
+# Implementation Task
+
+## Strategy
+$STRATEGY
+
+## Specification
+$SPEC
+
+## Context Files
+$(for f in "${CONTEXT_FILES[@]}"; do
+  echo "### $f"
+  echo '```'
+  cat "$f"
+  echo '```'
+done)
+
+## Constraints
+$CONSTRAINTS
+
+## Rules
+- Do NOT commit your changes. Leave all modifications as uncommitted files.
+- Write a self-assessment card to .dev/diverge-card.json with this structure:
+  {"approach": "5-10 line summary", "assumptions": [...], "risks": [...], "new_dependencies": [...]}
+- Follow existing project patterns and conventions.
+PROMPT
+done
+```
+
+#### 6. Agent Dispatch
+
+All three run as background tasks. Agents DO NOT commit — all changes remain as uncommitted modifications in the worktree.
+
+**`run_with_timeout` function** (python process group kill for reliable child cleanup):
+
+```bash
+run_with_timeout() {
+  local timeout_s="$1"; shift
+  python3 -c "
+import os, signal, subprocess, sys
+timeout = int(sys.argv[1])
+cmd = sys.argv[2:]
+p = subprocess.Popen(cmd, start_new_session=True)
+try:
+    rc = p.wait(timeout=timeout)
+    sys.exit(rc)
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(p.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        p.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    sys.exit(124)
+" "$timeout_s" "$@"
+}
+```
+
+Exit code 124 = timeout (matches GNU `timeout` convention). Default `$TIMEOUT` = 300 (configurable via `--timeout`).
+
+**Claude (sonnet subagent) — run_in_background: true:**
+
+```
+subagent_type="general-purpose", model="sonnet", run_in_background=true
+Prompt: contents of ${WT[A]}/.dev/diverge-prompt.md
+Working directory: ${WT[A]}
+```
+
+**Bash call (codex) — run_in_background: true:**
+
+```bash
+PROMPT_FILE="${WT[B]}/.dev/diverge-prompt.md"
+ERR="$RUN_DIR/codex-stderr.log"
+
+run_with_timeout "$TIMEOUT" \
+  codex exec --full-auto -C "${WT[B]}" \
+    "$(cat "$PROMPT_FILE")" \
+  >"$RUN_DIR/codex-stdout.log" 2>"$ERR"
+CODEX_EXIT=$?
+
+if [ $CODEX_EXIT -ne 0 ]; then
+  if grep -qi "auth\|login\|403\|401\|credentials\|token" "$ERR"; then
+    echo "Codex auth error. Run: codex auth"
+    CODEX_STATUS="auth_expired"
+  elif [ $CODEX_EXIT -eq 124 ]; then
+    CODEX_STATUS="timeout"
+  else
+    echo "Codex error (exit $CODEX_EXIT):"; head -5 "$ERR"
+    CODEX_STATUS="error"
+  fi
+else
+  CODEX_STATUS="ok"
+fi
+```
+
+**Bash call (gemini) — run_in_background: true:**
+
+```bash
+PROMPT_FILE="${WT[C]}/.dev/diverge-prompt.md"
+ERR="$RUN_DIR/gemini-stderr.log"
+
+# Load prompt into variable first — single quotes block expansion
+PROMPT=$(cat "$PROMPT_FILE")
+
+run_with_timeout "$TIMEOUT" \
+  sh -c "cd '${WT[C]}' && gemini -p \"\$DIVERGE_PROMPT\" -y -o text" \
+  >"$RUN_DIR/gemini-stdout.log" 2>"$ERR"
+GEMINI_EXIT=$?
+# Alternative: export DIVERGE_PROMPT="$PROMPT" before the run_with_timeout call
+
+if [ $GEMINI_EXIT -ne 0 ]; then
+  if grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then
+    echo "Gemini auth error. Run: gemini login"
+    GEMINI_STATUS="auth_expired"
+  elif [ $GEMINI_EXIT -eq 124 ]; then
+    GEMINI_STATUS="timeout"
+  else
+    echo "Gemini error (exit $GEMINI_EXIT):"; head -5 "$ERR"
+    GEMINI_STATUS="error"
+  fi
+else
+  GEMINI_STATUS="ok"
+fi
+```
+
+**NOTE:** Always load the Gemini prompt into a variable first (`PROMPT=$(cat "$PROMPT_FILE")`), then pass via `"$PROMPT"`. Single-quote expansion (`'$(cat ...)'`) blocks variable substitution and will NOT work.
+
+Collect all results using `TaskOutput` tool (block: true) for each background task ID.
+
+#### 7. Staged Evaluation
+
+**Problem:** 3 full diffs simultaneously can overflow the evaluator's context (e.g., 3 × 50KB = 150k+ tokens). **Solution:** Two-pass evaluation.
+
+**Pass 1: Stats + Cards**
+
+```bash
+for LABEL in A B C; do
+  git -C "${WT[$LABEL]}" diff --name-status "$BASE_COMMIT" \
+    > "$RUN_DIR/$LABEL-name-status.txt"
+  git -C "${WT[$LABEL]}" diff --numstat "$BASE_COMMIT" \
+    > "$RUN_DIR/$LABEL-numstat.txt"
+
+  if [ -f "${WT[$LABEL]}/.dev/diverge-card.json" ]; then
+    cp "${WT[$LABEL]}/.dev/diverge-card.json" "$RUN_DIR/$LABEL-card.json"
+  else
+    echo '{"approach":"(agent did not write card)","assumptions":[],"risks":[],"new_dependencies":[]}' \
+      > "$RUN_DIR/$LABEL-card.json"
+  fi
+done
+```
+
+Build a Per-Solution Card from stats (labels anonymized as Solution 1/2/3 — provider-solution mapping stored in `$RUN_DIR/label-map.json` but NOT passed to the evaluator):
+
+```json
+{
+  "label": "1",
+  "strategy": "minimal",
+  "status": "ok|timeout|error",
+  "files_changed": 3,
+  "lines_added": 42,
+  "lines_removed": 12,
+  "files_list": ["src/api.py", "tests/test_api.py"],
+  "card": {
+    "approach": "agent's self-summary",
+    "assumptions": ["..."],
+    "risks": ["..."],
+    "new_dependencies": []
+  }
+}
+```
+
+**Pass 2: Full Diff on Demand**
+
+Only after the Decision Matrix is presented:
+```bash
+git -C "${WT[$SELECTED]}" diff "$BASE_COMMIT"
+```
+
+#### 8. Test Integration (`--run-tests`)
+
+Before running tests, verify a test suite exists:
+
+```bash
+# Check HAS_TESTS — look for common test runner configs
+HAS_TESTS=false
+for RUNNER in pytest jest go npm; do
+  if command -v "$RUNNER" &>/dev/null; then HAS_TESTS=true; break; fi
+done
+# Also check for test files
+if ls tests/ &>/dev/null || ls test/ &>/dev/null; then HAS_TESTS=true; fi
+```
+
+If `HAS_TESTS=false` → mark `Tests: not run` in decision matrix (do not error).
+
+If test suite found:
+
+```bash
+for LABEL in A B C; do
+  (cd "${WT[$LABEL]}" && $TEST_COMMAND 2>&1) > "$RUN_DIR/$LABEL-test-results.txt"
+  echo "exit:$?" >> "$RUN_DIR/$LABEL-test-results.txt"
+done
+```
+
+A solution that fails existing tests gets Correctness score capped at 1. Test results are passed to the evaluator as additional input.
+
+**Guard:** `--lite --run-tests` → error: "Cannot run tests in lite mode (no code)." (also caught at input parsing).
+
+#### 9. Decision Matrix (Evaluator)
+
+The evaluator is a **separate Claude invocation** — NOT the orchestrator (mitigates self-preference bias):
+
+```
+subagent_type="general-purpose", model="sonnet" (or opus if risk=high)
+run_in_background=false
+```
+
+Evaluator prompt receives:
+- 3 solution cards (anonymized as Solution 1/2/3)
+- 3 file-level diffs (`--name-status`)
+- 3 numstats
+- The original spec
+- **NO provider names, NO model names**
+
+The evaluator produces raw scores per criterion. **Weighted totals are computed programmatically** (not by LLM) via bash arithmetic:
+
+```bash
+# Weights: correctness=5, change_size=3, maintainability=4, test_coverage=4,
+#          backward_compat=3, performance=2, security=5
+WEIGHTS=(5 3 4 4 3 2 5)
+
+for SOL in 1 2 3; do
+  TOTAL=0
+  for i in "${!WEIGHTS[@]}"; do
+    SCORE=$(jq -r ".solutions[$SOL].scores[$i]" "$RUN_DIR/evaluator-output.json")
+    TOTAL=$((TOTAL + WEIGHTS[i] * SCORE))
+  done
+  echo "Solution $SOL: $TOTAL"
+done
+```
+
+**Evaluator overflow fallback:** if evaluator context overflows → fall back to stats/cards only (no diff content).
+
+#### 10. Decision Matrix Output Format
+
+```markdown
+## Diverge Report: <spec summary>
+
+**Evaluator:** independent (anonymized labels, formula-computed totals)
+**Run ID:** 20260301T100000Z-12345
+
+### Summary
+
+| | Solution 1 | Solution 2 | Solution 3 |
+|---|---|---|---|
+| Strategy | minimal | refactor | redesign |
+| Files changed | 3 | 5 | 8 |
+| Lines +/- | +42/-12 | +87/-34 | +156/-67 |
+| New deps | 0 | 0 | 1 (p-retry) |
+| Tests | PASS | PASS | 2 FAIL |
+
+### Decision Matrix
+
+| Criterion (weight) | Sol 1 | Sol 2 | Sol 3 | Notes |
+|---|---|---|---|---|
+| Correctness (5) | 4 | 4 | 5 | Sol 3 handles edge case X |
+| Change size (3) | 5 | 3 | 1 | Sol 1 is surgical |
+| Maintainability (4) | 3 | 5 | 4 | Sol 2 cleanest structure |
+| Test coverage (4) | 3 | 4 | 5 | Sol 3 adds most tests |
+| Backward compat (3) | 5 | 4 | 3 | Sol 1 preserves all interfaces |
+| Performance (2) | 4 | 4 | 4 | No significant difference |
+| Security (5) | 4 | 4 | 4 | No issues found |
+| **Weighted total** | **99** | **106** | **104** | formula-computed |
+
+### Recommendation
+
+**Solution 2 (refactor)** scores highest. Solution 1 is the safe fallback.
+
+### Options
+1. Merge Solution 1 → current branch
+2. Merge Solution 2 → current branch
+3. Merge Solution 3 → current branch
+4. Inspect full diff (specify solution number)
+5. Hybrid: cherry-pick files manually (`git restore --source <branch> -- <path>`)
+6. Discard all
+```
+
+After user selects, reveal the provider mapping:
+```
+> Solution 1 = Claude (sonnet) | Solution 2 = Codex (GPT) | Solution 3 = Gemini
+```
+
+#### 11. Merge
+
+```bash
+SELECTED_LABEL="B"  # mapped from user's solution choice
+SELECTED_BRANCH="diverge/$RUN_ID-selected"
+
+# HEAD drift check
+CURRENT_HEAD="$(git rev-parse HEAD)"
+if [ "$CURRENT_HEAD" != "$BASE_COMMIT" ]; then
+  echo "WARNING: HEAD moved during diverge ($BASE_COMMIT → $CURRENT_HEAD)."
+  echo "Merge may have conflicts. Proceed? (yes / abort)"
+fi
+
+# Show files in selected worktree
+git -C "${WT[$SELECTED_LABEL]}" status --short
+
+# Create branch only for selected solution
+git -C "${WT[$SELECTED_LABEL]}" switch -c "$SELECTED_BRANCH"
+
+# Stage changes, excluding .dev/ artifacts
+git -C "${WT[$SELECTED_LABEL]}" add -A -- . ':!.dev/'
+git -C "${WT[$SELECTED_LABEL]}" commit -m "diverge: <spec summary> (strategy: <strategy>)"
+
+# Merge into working branch
+git merge --no-ff "$SELECTED_BRANCH"
+
+# Cleanup handled by trap
+```
+
+Save report to `.dev/diverge-report.md` for audit trail. Append selection metadata.
+
+Append JSONL metrics artifact (append-only, per-run stats):
+```bash
+cat >> .dev/diverge-metrics.jsonl <<EOF
+{"run_id":"$RUN_ID","selected":"Solution 2","provider":"codex","strategy":"refactor","scores":{...},"selected_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+EOF
+```
+
+#### 12. Lite Mode (`--lite`)
+
+Design-level divergence without code generation. ~1.5× token cost, ~10× faster than full diverge.
+
+Each model produces a **design doc** (architecture + files + risks) instead of code. No worktrees are created — outputs are text artifacts stored in `$RUN_DIR`.
+
+Prompt modification:
+```
+Do NOT write code. Instead, produce a design document with:
+- ## Approach (5-10 lines describing the strategy)
+- ## Files (list of files to create/modify with brief notes)
+- ## Risks (top 5 risks and mitigations)
+- ## Dependencies (new packages needed, if any)
+```
+
+Output: side-by-side comparison of 3 designs → user picks one.
+
+**Lite → Implementation handoff** (after user selects a design):
+
+1. Save selected design to `.dev/diverge-selected-design.md`
+2. Save full comparison report to `.dev/diverge-report.md`
+3. Ask the user:
+   ```
+   > Selected design saved. How to proceed?
+   > 1. sigil build — run sigil Phase 3 using this design
+   > 2. arbiter implement — delegate to a single provider
+   > 3. manual — implement yourself
+   ```
+4. If **sigil flow** (`build_strategy=diverge-lite`): overwrite `.dev/design.md` with the selected design, proceed to Phase 3 (standard build, not diverge again)
+5. If **standalone**: user decides next step
+
+---
+
 ## Help
 
 When invoked without arguments (`/arbiter`), show:
@@ -670,6 +1190,7 @@ Modes:
   quorum      Formal go/no-go verdict (high-stakes only)
   verify      Cross-verification with claim decomposition
   continue    Resume last session (gemini only)
+  diverge     3 independent solutions, compare & select
 
 Usage: /arbiter <mode> [--via codex|gemini] [--base <branch>] [args]
 
@@ -684,6 +1205,9 @@ Examples:
   /arbiter quorum --with-diff "are these migration changes safe?"
   /arbiter verify "Is SQLite safe for concurrent writes in production?"
   /arbiter verify --with-diff "is this thread-safe?"
+  /arbiter diverge "implement caching layer"
+  /arbiter diverge --lite "redesign auth module"
+  /arbiter diverge --run-tests "add input validation"
 ```
 
 Provider status: run `which codex && codex --version` / `which gemini && gemini --version`. Show checkmark if found, cross if missing.
@@ -724,6 +1248,11 @@ Before every provider call, show the effective command:
 8. **Orphan worktrees** → on error during implement, always clean up. Note: `git worktree list | grep arbiter/` for manual cleanup.
 9. **Quorum parse failure** → if provider response lacks `VERDICT:` line, mark as PARSE_ERROR. Do not count as a vote.
 10. **Quorum degraded** → if only 1 of 2 providers responded, warn user: "Degraded quorum (1/2 providers)."
+11. **Diverge: dirty tree** → STOP. Ask: stash / commit / abort.
+12. **Diverge: provider unavailable** → Skip, redistribute strategy to available provider.
+13. **Diverge: all providers fail** → STOP, show errors, suggest `arbiter implement` instead.
+14. **Diverge: HEAD drift** → WARN, ask user to confirm merge or abort.
+15. **Diverge: evaluator overflow** → Fallback to stats/cards only (no diff content).
 
 ## Backward Compatibility
 
@@ -736,10 +1265,11 @@ If triggered via `/codex` (old trigger), handle normally — arbiter processes t
 3. **Show effective command** before execution for transparency.
 4. **Cost awareness** — mention if task seems trivial for the selected provider/model.
 5. **Worktree cleanup** on error/discard (implement mode). Never leave orphans.
-6. **No anchored review** — never show provider A's full answer to provider B for confirmation. Cross-verification must use anonymous claim decomposition (verify mode) or independent generation (panel/quorum).
+6. **No anchored review** — never show provider A's full answer to provider B for confirmation. Cross-verification must use anonymous claim decomposition (verify mode) or independent generation (panel/quorum). Exception: diverge evaluation compares all solutions equally using anonymized labels (Solution 1/2/3).
 7. **Panel: partial failure OK** — if one provider fails, report failure + show others.
 8. **Codex review = text** — always parse as plain text, never expect JSON.
 9. **Gemini stderr = tempfile** — never `2>/dev/null` blindly, always check for auth errors first.
 10. **Quorum: Claude does NOT vote** — only Codex and Gemini vote. Claude moderates and breaks ties.
 11. **Quorum: deterministic policy first** — apply decision rules before LLM synthesis. Never override a clear BLOCK without evidence.
 12. **Quorum: minimum 1 external** — if both providers fail, abort with error. Never produce a quorum from 0 external votes.
+13. **Diverge: no commits.** Agents do not commit. All changes stay uncommitted in worktrees. Diff against base_commit.
