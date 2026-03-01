@@ -5,6 +5,7 @@ description: >
   "codex review", "gemini review", "panel mode", "compare AIs",
   "second opinion from codex", "second opinion from gemini",
   "quorum", "go/no-go", "consensus vote",
+  "verify", "fact-check", "cross-check", "is this true",
   or wants to delegate work to an external AI CLI (Codex, Gemini).
   Arbiter dispatches to multiple providers and presents compared results.
 ---
@@ -28,7 +29,7 @@ description: >
 | implement | `codex exec --full-auto -C "<worktree>" "<spec>"` | `(cd "<worktree>" && gemini -p "<spec>" -y -o text)` | codex |
 | continue | Not supported in v1 | `gemini -r latest -p "<follow-up>" -o text` | gemini |
 
-**Note:** `quorum` is not in this table — it's a consensus protocol, not single-provider dispatch. Quorum always runs both providers (see [quorum mode](#quorum)).
+**Note:** `quorum` and `verify` are not in this table — they are multi-provider protocols, not single-provider dispatch. Quorum always runs both providers (see [quorum mode](#quorum)). Verify always runs both providers (see [verify mode](#verify)).
 
 ### Capability Notes
 - **Codex** uses `-p` for profiles (fast, default, full). `-c model_reasoning_effort=high` for reasoning override.
@@ -52,6 +53,8 @@ description: >
 /arbiter panel "question"                    → ask BOTH providers, compare
 /arbiter quorum "question or proposal"       → 2-provider vote + Claude synthesis
 /arbiter quorum --with-diff "question"       → include git diff as context
+/arbiter verify "question or claim"          → 3-round cross-verification
+/arbiter verify --with-diff "question"       → include git diff as context
 /arbiter continue "follow-up"               → gemini only (codex not supported in v1)
 /arbiter                                     → show help + provider status
 ```
@@ -60,12 +63,13 @@ description: >
 
 Parse the user's `/arbiter` invocation by matching these patterns in order:
 
-1. Extract mode: first word after `/arbiter` → `review|ask|implement|panel|quorum|continue`
+1. Extract mode: first word after `/arbiter` → `review|ask|implement|panel|quorum|verify|continue`
 2. Extract `--via <provider>`: if present, set provider (codex|gemini). Not applicable to `quorum` (always both).
 3. Extract mode-specific flags:
    - review: `--base <branch>`, `--commit <sha>`
    - ask: `--with-diff`
    - quorum: `--with-diff`
+   - verify: `--with-diff`
 4. Remaining quoted string → prompt/question/spec
 5. If no mode → show help
 
@@ -73,6 +77,7 @@ Parse the user's `/arbiter` invocation by matching these patterns in order:
 - `--base` + `--commit` → error: "Choose one: --base or --commit"
 - `--via unknown` → error: "Unknown provider. Available: codex, gemini"
 - `quorum --via <any>` → error: "Quorum always runs both providers. No --via flag."
+- `verify --via <any>` → error: "Verify always runs both providers. No --via flag."
 - `continue --via codex` → error: "Continue not supported for codex in v1. Use --via gemini."
 
 ## Modes
@@ -459,6 +464,174 @@ fi
 
 ---
 
+### verify
+
+**Purpose:** Cross-model verification with claim decomposition. Catches hallucinations, agreement bias, and unsupported claims that panel/quorum miss.
+
+**When to use:** Factual questions, technical claims, "is X true?", any answer where correctness matters more than speed.
+
+**verify always runs both providers. No `--via` flag.**
+
+#### Round 1 — Independent Generation (parallel)
+
+Same pattern as panel: two Bash calls with `run_in_background: true`.
+Each provider answers the question independently, with NO shared context.
+
+**Bash call 1 (codex) — run_in_background: true:**
+```bash
+OUT=$(mktemp) || { echo "CODEX_ERROR: cannot create temp file"; exit 1; }
+CONTEXT=""
+# If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
+codex exec --ephemeral -C "$PWD" -p fast \
+  --output-last-message "$OUT" "<prompt>" 2>&1
+echo "---CODEX_ANSWER---"
+cat "$OUT"; rm -f "$OUT"
+```
+
+**Bash call 2 (gemini) — run_in_background: true:**
+```bash
+CONTEXT=""
+# If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
+ERR=$(mktemp)
+RESP=$(gemini -p "${CONTEXT}<prompt>" -o text 2>"$ERR")
+EXIT=$?
+# Standard Gemini error handling (see Error Handling §7)
+if [ $EXIT -ne 0 ]; then
+  if grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then echo "GEMINI_ERROR: auth"
+  else echo "GEMINI_ERROR: exit $EXIT"; cat "$ERR"
+  fi
+fi
+rm -f "$ERR"
+echo "---GEMINI_ANSWER---"
+echo "$RESP"
+```
+
+Collect both results using `TaskOutput` tool (block: true) for each background task ID.
+
+#### Round 2 — Claim Decomposition & Comparison (Claude)
+
+Claude performs (NO external calls — this is Claude's own analysis):
+
+1. Decompose BOTH answers into numbered atomic claims
+   - One verifiable fact per claim
+   - Skip opinions, hedging, tautologies
+   - Max 15 claims per answer
+
+2. Compare claims between answers:
+   - **AGREED**: both answers make the same claim
+   - **CONTESTED**: one answer claims X, other claims not-X or different
+   - **UNIQUE**: claim appears in only one answer (not contradicted)
+
+3. If zero CONTESTED claims → skip Round 3, go to synthesis
+
+#### Round 3 — Adversarial Cross-Verification (parallel, conditional)
+
+Only runs if Round 2 found CONTESTED claims.
+
+Build adversarial verification prompt with ANONYMOUS contested claims
+(Claude strips which model said what):
+
+```
+You are a skeptical fact-checker. Your goal is to FIND FLAWS, not confirm.
+
+For each claim below, respond:
+- PASS: claim is correct (explain why with supporting evidence)
+- FAIL: claim is wrong (provide specific counterexample or contradiction)
+- UNKNOWN: cannot determine (explain what evidence is needed)
+
+Do NOT agree by default. If you cannot verify, say UNKNOWN.
+
+Claims:
+1. [anonymous claim]
+2. [anonymous claim]
+...
+```
+
+Two Bash calls with `run_in_background: true`:
+
+**Bash call 1 (codex) — run_in_background: true:**
+```bash
+OUT=$(mktemp) || { echo "CODEX_ERROR: cannot create temp file"; exit 1; }
+echo "$ADVERSARIAL_PROMPT" | codex exec --ephemeral -C "$PWD" -p fast \
+  --output-last-message "$OUT" - 2>&1
+echo "---CODEX_VERIFY---"
+cat "$OUT"; rm -f "$OUT"
+```
+
+**Bash call 2 (gemini) — run_in_background: true:**
+```bash
+ERR=$(mktemp)
+RESP=$(gemini -p "$ADVERSARIAL_PROMPT" -o text 2>"$ERR")
+EXIT=$?
+if [ $EXIT -ne 0 ]; then
+  if grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then echo "GEMINI_ERROR: auth"
+  else echo "GEMINI_ERROR: exit $EXIT"; cat "$ERR"
+  fi
+fi
+rm -f "$ERR"
+echo "---GEMINI_VERIFY---"
+echo "$RESP"
+```
+
+Collect both results using `TaskOutput` tool (block: true) for each background task ID.
+
+#### Synthesis
+
+For each claim, determine status:
+- **VERIFIED**: agreed by both in Round 1, OR both verifiers PASS in Round 3
+- **CONTESTED**: verifiers disagree (one PASS, one FAIL) → surface both arguments
+- **REJECTED**: both verifiers FAIL → flag explicitly with counterexamples
+- **UNCERTAIN**: both verifiers UNKNOWN → may need external evidence
+
+#### Output Format
+
+```
+## Verify: "<question>"
+
+### Answer (synthesized)
+[Merged answer using only VERIFIED claims. Contested claims presented as "X, though this is disputed because Y"]
+
+### Claim Analysis
+
+| # | Claim | Status | Detail |
+|---|-------|--------|--------|
+| 1 | ... | VERIFIED | Both providers agree |
+| 2 | ... | CONTESTED | Codex: PASS, Gemini: FAIL — [counterexample] |
+| 3 | ... | REJECTED | Both found errors — [correction] |
+
+### Contested Claims (detail)
+[For each CONTESTED claim: both sides of the argument]
+
+### Confidence
+X/Y claims verified, Z contested, W rejected.
+[HIGH / MEDIUM / LOW / NEEDS HUMAN REVIEW]
+
+Thresholds:
+- HIGH: >80% VERIFIED, 0 REJECTED
+- MEDIUM: >60% VERIFIED, ≤1 REJECTED
+- LOW: <60% VERIFIED or >1 REJECTED
+- NEEDS HUMAN REVIEW: >30% CONTESTED+REJECTED
+```
+
+#### Logging
+
+Same pattern as quorum — append to `~/vicc/state/quorum-log.md` conditionally (if dir exists):
+```bash
+if [ -d ~/vicc/state ]; then
+cat >> ~/vicc/state/quorum-log.md << EOF
+
+## <timestamp>
+
+**Question:** <first 3 lines>
+**Result:** <confidence> (X verified, Y contested, Z rejected)
+**Rounds:** <2 or 3>
+**Source:** arbiter verify
+EOF
+fi
+```
+
+---
+
 ### continue
 
 **Purpose:** Resume the last Gemini session with a follow-up.
@@ -495,6 +668,7 @@ Modes:
   implement   Delegate implementation (default: codex)
   panel       Ask all providers, compare
   quorum      Formal go/no-go verdict (high-stakes only)
+  verify      Cross-verification with claim decomposition
   continue    Resume last session (gemini only)
 
 Usage: /arbiter <mode> [--via codex|gemini] [--base <branch>] [args]
@@ -508,6 +682,8 @@ Examples:
   /arbiter implement --via gemini "add input validation"
   /arbiter quorum "should I drop the users table and recreate?"
   /arbiter quorum --with-diff "are these migration changes safe?"
+  /arbiter verify "Is SQLite safe for concurrent writes in production?"
+  /arbiter verify --with-diff "is this thread-safe?"
 ```
 
 Provider status: run `which codex && codex --version` / `which gemini && gemini --version`. Show checkmark if found, cross if missing.
@@ -560,7 +736,7 @@ If triggered via `/codex` (old trigger), handle normally — arbiter processes t
 3. **Show effective command** before execution for transparency.
 4. **Cost awareness** — mention if task seems trivial for the selected provider/model.
 5. **Worktree cleanup** on error/discard (implement mode). Never leave orphans.
-6. **No recursive AI review** — don't use provider A to review provider B's output.
+6. **No anchored review** — never show provider A's full answer to provider B for confirmation. Cross-verification must use anonymous claim decomposition (verify mode) or independent generation (panel/quorum).
 7. **Panel: partial failure OK** — if one provider fails, report failure + show others.
 8. **Codex review = text** — always parse as plain text, never expect JSON.
 9. **Gemini stderr = tempfile** — never `2>/dev/null` blindly, always check for auth errors first.
