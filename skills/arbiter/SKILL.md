@@ -677,13 +677,13 @@ CODEX_BIN=$(which codex 2>/dev/null) && CODEX_VER=$(codex --version 2>&1 | head 
 GEMINI_BIN=$(which gemini 2>/dev/null) && GEMINI_VER=$(gemini --version 2>&1 | head -1)
 ```
 
-2. **Smoke API tests** (parallel, background — two Bash calls with `run_in_background: true`):
+2. **Smoke API tests** (parallel, background — two Bash calls with `run_in_background: true`). Note: do NOT use `timeout` command (unavailable on macOS). Use Bash tool's built-in timeout parameter instead:
 
 Codex:
 ```bash
 OUT=$(mktemp); ERR=$(mktemp)
 START=$(date +%s)
-timeout 30 codex exec --ephemeral -p fast \
+codex exec --ephemeral -p fast \
   --output-last-message "$OUT" "Reply with exactly: ARBITER_HEALTH_OK" 2>"$ERR"
 CODEX_API_EXIT=$?
 CODEX_LATENCY=$(( $(date +%s) - START ))
@@ -694,7 +694,7 @@ Gemini:
 ```bash
 ERR=$(mktemp)
 START=$(date +%s)
-GEMINI_API_RESP=$(timeout 30 gemini -p "Reply with exactly: ARBITER_HEALTH_OK" -o text 2>"$ERR")
+GEMINI_API_RESP=$(gemini -p "Reply with exactly: ARBITER_HEALTH_OK" -o text 2>"$ERR")
 GEMINI_API_EXIT=$?
 GEMINI_LATENCY=$(( $(date +%s) - START ))
 if [ $GEMINI_API_EXIT -ne 0 ]; then
