@@ -10,9 +10,12 @@ Example: `/arbiter panel "Is a task queue the right abstraction here, or should 
 
 **Install**
 
+<!-- INSTALL:START — auto-synced from emporium/INSTALL_REFERENCE.md -->
+```bash
+claude plugin marketplace add heurema/emporium
+claude plugin install arbiter@emporium
 ```
-skill7 install arbiter
-```
+<!-- INSTALL:END -->
 
 **First use**
 
