@@ -811,7 +811,7 @@ Write `$RUN_DIR/diverge-pack.json`:
   "spec": "user's implementation spec (verbatim)",
   "context_files": ["list of files read for context"],
   "context_contents": {"path/to/file.py": "frozen file content..."},
-  "constraints": "extracted from exploration.md if in sigil flow",
+  "constraints": "extracted from exploration.md if in signum flow",
   "base_commit": "abc123def",
   "strategies": ["minimal", "refactor", "redesign"],
   "providers": ["claude", "codex", "gemini"],
@@ -1239,11 +1239,11 @@ Output: side-by-side comparison of 3 designs → user picks one.
 3. Ask the user:
    ```
    > Selected design saved. How to proceed?
-   > 1. sigil build — run sigil Phase 3 using this design
+   > 1. signum build — run signum Phase 3 using this design
    > 2. arbiter implement — delegate to a single provider
    > 3. manual — implement yourself
    ```
-4. If **sigil flow** (`build_strategy=diverge-lite`): overwrite `.dev/design.md` with the selected design, proceed to Phase 3 (standard build, not diverge again)
+4. If **signum flow** (`build_strategy=diverge-lite`): overwrite `.dev/design.md` with the selected design, proceed to Phase 3 (standard build, not diverge again)
 5. If **standalone**: user decides next step
 
 ---
