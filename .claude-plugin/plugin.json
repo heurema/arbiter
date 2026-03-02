@@ -8,8 +8,5 @@
   "homepage": "https://github.com/heurema/arbiter",
   "repository": "https://github.com/heurema/arbiter",
   "license": "MIT",
-  "keywords": ["ai", "codex", "gemini", "review", "orchestrator", "quorum", "consensus", "verdict", "diverge", "worktree", "parallel-implementation", "compare", "doctor", "health-check", "partial-success"],
-  "status": "active",
-  "owner": "heurema",
-  "tags": ["devtools", "ai", "orchestrator"]
+  "keywords": ["ai", "codex", "gemini", "review", "orchestrator", "quorum", "consensus", "verdict", "diverge", "worktree", "parallel-implementation", "compare", "doctor", "health-check", "partial-success"]
 }
