@@ -74,6 +74,26 @@ claude plugin install .
 - Isolated implementation creates a fresh git worktree per provider so changes never touch your working tree
 - Parallel diverge produces three independent solutions with different strategy hints (minimal / refactor / redesign) and lets you merge only the one you choose
 
+## Provider Configuration (optional)
+
+Create `~/.claude/emporium-providers.local.md` to customize which models Codex and Gemini use:
+
+```yaml
+---
+version: 1
+defaults:
+  codex:
+    model: "gpt-5.3-codex"
+  gemini:
+    model: "gemini-3.1-pro"
+routing:
+  review:
+    gemini: "gemini-3-flash"
+---
+```
+
+Without this file, arbiter uses each CLI's default model. See `forge doctor` to validate your config.
+
 ## Requirements
 
 - Claude Code with skill support
@@ -82,6 +102,7 @@ claude plugin install .
 - Git repository for `review`, `implement`, and `diverge` modes
 - Clean working tree for `diverge` (uncommitted changes must be stashed or committed first)
 - 120-second timeout per provider call for most modes; `diverge` defaults to 300 seconds per agent (configurable via `--timeout`)
+- Optional: [Forge](https://github.com/heurema/forge) for `forge doctor` config validation
 
 ## Privacy
 
