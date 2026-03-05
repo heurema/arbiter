@@ -33,6 +33,91 @@ description: >
 
 **Note:** `quorum` and `verify` are not in this table — they are multi-provider protocols, not single-provider dispatch. Quorum always runs both providers (see [quorum mode](#quorum)). Verify always runs both providers (see [verify mode](#verify)).
 
+### Model Resolution
+
+Before provider CLI calls, resolve model from config if available:
+
+```bash
+_PROVIDERS_CONFIG="${EMPORIUM_PROVIDERS_CONFIG:-$HOME/.claude/emporium-providers.local.md}"
+_resolve_model() {
+  local task="$1" provider="$2"
+  [ -r "$_PROVIDERS_CONFIG" ] || { echo ""; return 0; }
+  python3 -c "
+import re, sys, os
+config_path = os.environ.get('EMPORIUM_PROVIDERS_CONFIG', os.path.expanduser('~/.claude/emporium-providers.local.md'))
+try:
+    text = open(config_path).read()
+except Exception:
+    sys.exit(0)
+if text.startswith('\ufeff'):
+    text = text[1:]
+m = re.match(r'^---\s*\n(.*?)\n---', text, re.DOTALL)
+if not m:
+    sys.exit(0)
+def parse_yaml(yaml_text):
+    result = {}
+    stack = [(-1, result)]
+    for line in yaml_text.splitlines():
+        if not line.strip() or line.strip().startswith('#'):
+            continue
+        indent = len(line) - len(line.lstrip())
+        kv = line.strip()
+        while len(stack) > 1 and indent <= stack[-1][0]:
+            stack.pop()
+        if ':' not in kv:
+            if kv.startswith('- '):
+                v = kv[2:].strip().strip('\"')
+                d = stack[-1][1]
+                for k in reversed(list(d.keys())):
+                    if isinstance(d[k], list):
+                        d[k].append(v)
+                        break
+            continue
+        key, _, value = kv.partition(':')
+        key = key.strip()
+        value = value.strip().strip('\"')
+        d = stack[-1][1]
+        if not value:
+            nd = {}
+            d[key] = nd
+            stack.append((indent, nd))
+        else:
+            try: d[key] = int(value)
+            except ValueError:
+                if value.lower() in ('true','false'): d[key] = value.lower() == 'true'
+                else: d[key] = value
+    return result
+try:
+    import yaml
+    cfg = yaml.safe_load(m.group(1)) or {}
+except ImportError:
+    cfg = parse_yaml(m.group(1))
+task = sys.argv[1]
+provider = sys.argv[2]
+route = cfg.get('routing', {})
+model = ''
+if task in route and isinstance(route[task], dict) and provider in route[task]:
+    model = str(route[task][provider])
+elif 'default' in route and isinstance(route['default'], dict) and provider in route['default']:
+    model = str(route['default'][provider])
+else:
+    pd = cfg.get('defaults', {}).get(provider, {})
+    if isinstance(pd, dict): model = str(pd.get('model', ''))
+if model and not re.match(r'^[A-Za-z0-9._:-]+$', model): model = ''
+print(model, end='')
+" "$task" "$provider" 2>/dev/null
+}
+```
+
+**Usage pattern:**
+```bash
+MODEL=$(_resolve_model "<task>" "<provider>")
+MODEL_FLAG=""
+[ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
+```
+
+NOTE: This version passes task/provider as sys.argv instead of bash string interpolation (addresses the security concern from signum code review).
+
 ### Capability Notes
 - **Codex** uses `-p` for profiles (fast, default, full). `-c model_reasoning_effort=high` for reasoning override.
 - **Gemini** uses `-o text` always (not `-o json` — that wraps in transport envelope). `-y` for auto-accept in implement.
@@ -110,13 +195,16 @@ Parse the user's `/arbiter` invocation by matching these patterns in order:
 
 **Codex (default):**
 ```bash
-codex review 2>&1                                     # uncommitted
-codex review --base main 2>&1                         # PR review
-codex review --commit abc123 2>&1                     # specific commit
-codex review "focus on auth boundaries" 2>&1          # custom instructions
-codex review -c model_reasoning_effort=high 2>&1      # override reasoning
+# NOTE: codex review may not support --model. If unsupported, omit MODEL_FLAG.
+MODEL=$(_resolve_model "review" "codex")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
+codex review $MODEL_FLAG 2>&1                                     # uncommitted
+codex review $MODEL_FLAG --base main 2>&1                         # PR review
+codex review $MODEL_FLAG --commit abc123 2>&1                     # specific commit
+codex review $MODEL_FLAG "focus on auth boundaries" 2>&1          # custom instructions
+codex review $MODEL_FLAG -c model_reasoning_effort=high 2>&1      # override reasoning
 ```
-NOTE: `codex review` does NOT support `-p` (profile). Use `-c` for overrides.
+NOTE: `codex review` does NOT support `-p` (profile). Use `-c` for overrides. `--model` support is unconfirmed — test with `codex review --help` and remove MODEL_FLAG if unsupported.
 
 **Gemini (--via gemini):**
 ```bash
@@ -124,10 +212,12 @@ NOTE: `codex review` does NOT support `-p` (profile). Use `-c` for overrides.
 DIFF_LINES=$(git diff | wc -l)
 if [ "$DIFF_LINES" -eq 0 ]; then echo "No changes to review."; exit 0; fi
 
+MODEL=$(_resolve_model "review" "gemini")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 ERR=$(mktemp)
 
 # Small diff (<300 lines) — single call
-RESP=$(git diff | gemini -p "You are a code reviewer. Review the diff on stdin. \
+RESP=$(git diff | gemini $MODEL_FLAG -p "You are a code reviewer. Review the diff on stdin. \
 Report ONLY: bugs, security issues, performance problems. Skip style. \
 Format: list each finding as '- [file:line] severity: description'" -o text 2>"$ERR")
 # Standard Gemini error handling (see Error Handling §7) — exit 1 on failure
@@ -135,14 +225,14 @@ Format: list each finding as '- [file:line] severity: description'" -o text 2>"$
 
 # Large diff (>300 lines) — MUST chunk by file
 for FILE in $(git diff --name-only); do
-  RESP=$(git diff -- "$FILE" | gemini -p "Review this diff for $FILE. Report bugs, security, performance only." -o text 2>/dev/null)
+  RESP=$(git diff -- "$FILE" | gemini $MODEL_FLAG -p "Review this diff for $FILE. Report bugs, security, performance only." -o text 2>/dev/null)
   # collect per-file findings
 done
 ```
 
 For `--base main`:
 ```bash
-git diff main...HEAD | gemini -p "<review prompt>" -o text 2>"$ERR"
+git diff main...HEAD | gemini $MODEL_FLAG -p "<review prompt>" -o text 2>"$ERR"
 ```
 
 6. Parse findings into categories:
@@ -180,32 +270,40 @@ X issues found. Style issues filtered out.
 
 **Codex (default):**
 ```bash
+MODEL=$(_resolve_model "ask" "codex")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 OUT=$(mktemp) || { echo "Cannot create temp file"; return 1; }
-codex exec --ephemeral -C "$PWD" -p "${PROFILE:-fast}" \
+codex exec --ephemeral -C "$PWD" -p "${PROFILE:-fast}" $MODEL_FLAG \
   --output-last-message "$OUT" "<prompt>" 2>&1
 ANSWER=$(cat "$OUT"); rm -f "$OUT"
 ```
 
 **Codex with `--with-diff`:**
 ```bash
+MODEL=$(_resolve_model "ask" "codex")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 OUT=$(mktemp)
 { echo "Context (current changes):"; git diff; echo ""; echo "Question: <prompt>"; } | \
-  codex exec --ephemeral -C "$PWD" -p fast \
+  codex exec --ephemeral -C "$PWD" -p fast $MODEL_FLAG \
   --output-last-message "$OUT" - 2>&1
 ANSWER=$(cat "$OUT"); rm -f "$OUT"
 ```
 
 **Gemini (--via gemini):**
 ```bash
+MODEL=$(_resolve_model "ask" "gemini")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 ERR=$(mktemp)
-RESP=$(gemini -p "<prompt>" -o text 2>"$ERR")
+RESP=$(gemini $MODEL_FLAG -p "<prompt>" -o text 2>"$ERR")
 # Standard Gemini error handling (see Error Handling §7) — return 1 on failure
 ```
 
 **Gemini with `--with-diff`:**
 ```bash
+MODEL=$(_resolve_model "ask" "gemini")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 ERR=$(mktemp)
-RESP=$(git diff | gemini -p "<prompt>" -o text 2>"$ERR")
+RESP=$(git diff | gemini $MODEL_FLAG -p "<prompt>" -o text 2>"$ERR")
 # Standard Gemini error handling (see Error Handling §7) — return 1 on failure
 ```
 
@@ -245,13 +343,17 @@ git worktree add "/tmp/$BRANCH" -b "$BRANCH" HEAD
 
 **Codex (default):**
 ```bash
-codex exec --full-auto -C "/tmp/$BRANCH" "<spec>" 2>&1
+MODEL=$(_resolve_model "implement" "codex")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
+codex exec --full-auto -C "/tmp/$BRANCH" $MODEL_FLAG "<spec>" 2>&1
 ```
 
 **Gemini (--via gemini):**
 ```bash
+MODEL=$(_resolve_model "implement" "gemini")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 # IMPORTANT: subshell to avoid changing Claude's CWD
-(cd "/tmp/$BRANCH" && gemini -p "<spec>" -y -o text 2>/dev/null)
+(cd "/tmp/$BRANCH" && gemini $MODEL_FLAG -p "<spec>" -y -o text 2>/dev/null)
 ```
 
 5. Capture output and check exit code.
@@ -305,16 +407,20 @@ git branch -D "$BRANCH"
 
 **Bash call 1 (codex) — run_in_background: true:**
 ```bash
+MODEL=$(_resolve_model "ask" "codex")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 OUT=$(mktemp)
-codex exec --ephemeral -C "$PWD" -p fast --output-last-message "$OUT" "<prompt>" 2>&1
+codex exec --ephemeral -C "$PWD" -p fast $MODEL_FLAG --output-last-message "$OUT" "<prompt>" 2>&1
 echo "---CODEX_ANSWER---"
 cat "$OUT"; rm -f "$OUT"
 ```
 
 **Bash call 2 (gemini) — run_in_background: true:**
 ```bash
+MODEL=$(_resolve_model "ask" "gemini")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 ERR=$(mktemp)
-RESP=$(gemini -p "<prompt>" -o text 2>"$ERR")
+RESP=$(gemini $MODEL_FLAG -p "<prompt>" -o text 2>"$ERR")
 # Standard Gemini error handling (see Error Handling §7) — report GEMINI_ERROR on failure
 echo "---GEMINI_ANSWER---"
 echo "$RESP"
@@ -379,12 +485,14 @@ Quorum always runs both providers. No `--via` flag.
 
 **Bash call 1 (codex) — run_in_background: true:**
 ```bash
+MODEL=$(_resolve_model "review" "codex")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 OUT=$(mktemp) || { echo "CODEX_ERROR: cannot create temp file"; exit 1; }
 CONTEXT=""
 # If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
 STATE="State:\n$(git status --short)\n$(git log --oneline -3)\n\n"
 PROMPT="${CONTEXT}${STATE}<contract_prompt>\n\n---\n\n<question>"
-echo "$PROMPT" | codex exec --ephemeral -C "$PWD" -p fast \
+echo "$PROMPT" | codex exec --ephemeral -C "$PWD" -p fast $MODEL_FLAG \
   --output-last-message "$OUT" - 2>&1
 echo "---CODEX_ANSWER---"
 cat "$OUT"; rm -f "$OUT"
@@ -392,12 +500,14 @@ cat "$OUT"; rm -f "$OUT"
 
 **Bash call 2 (gemini) — run_in_background: true:**
 ```bash
+MODEL=$(_resolve_model "review" "gemini")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 CONTEXT=""
 # If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
 STATE="State:\n$(git status --short)\n$(git log --oneline -3)\n\n"
 PROMPT="${CONTEXT}${STATE}<contract_prompt>\n\n---\n\n<question>"
 ERR=$(mktemp)
-RESP=$(gemini -p "$PROMPT" -o text 2>"$ERR")
+RESP=$(gemini $MODEL_FLAG -p "$PROMPT" -o text 2>"$ERR")
 EXIT=$?
 # Standard Gemini error handling (see Error Handling §7)
 if [ $EXIT -ne 0 ]; then
@@ -492,10 +602,12 @@ Each provider answers the question independently, with NO shared context.
 
 **Bash call 1 (codex) — run_in_background: true:**
 ```bash
+MODEL=$(_resolve_model "review" "codex")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 OUT=$(mktemp) || { echo "CODEX_ERROR: cannot create temp file"; exit 1; }
 CONTEXT=""
 # If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
-codex exec --ephemeral -C "$PWD" -p fast \
+codex exec --ephemeral -C "$PWD" -p fast $MODEL_FLAG \
   --output-last-message "$OUT" "<prompt>" 2>&1
 echo "---CODEX_ANSWER---"
 cat "$OUT"; rm -f "$OUT"
@@ -503,10 +615,12 @@ cat "$OUT"; rm -f "$OUT"
 
 **Bash call 2 (gemini) — run_in_background: true:**
 ```bash
+MODEL=$(_resolve_model "review" "gemini")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 CONTEXT=""
 # If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
 ERR=$(mktemp)
-RESP=$(gemini -p "${CONTEXT}<prompt>" -o text 2>"$ERR")
+RESP=$(gemini $MODEL_FLAG -p "${CONTEXT}<prompt>" -o text 2>"$ERR")
 EXIT=$?
 # Standard Gemini error handling (see Error Handling §7)
 if [ $EXIT -ne 0 ]; then
@@ -564,8 +678,10 @@ Two Bash calls with `run_in_background: true`:
 
 **Bash call 1 (codex) — run_in_background: true:**
 ```bash
+MODEL=$(_resolve_model "review" "codex")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 OUT=$(mktemp) || { echo "CODEX_ERROR: cannot create temp file"; exit 1; }
-echo "$ADVERSARIAL_PROMPT" | codex exec --ephemeral -C "$PWD" -p fast \
+echo "$ADVERSARIAL_PROMPT" | codex exec --ephemeral -C "$PWD" -p fast $MODEL_FLAG \
   --output-last-message "$OUT" - 2>&1
 echo "---CODEX_VERIFY---"
 cat "$OUT"; rm -f "$OUT"
@@ -573,8 +689,10 @@ cat "$OUT"; rm -f "$OUT"
 
 **Bash call 2 (gemini) — run_in_background: true:**
 ```bash
+MODEL=$(_resolve_model "review" "gemini")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 ERR=$(mktemp)
-RESP=$(gemini -p "$ADVERSARIAL_PROMPT" -o text 2>"$ERR")
+RESP=$(gemini $MODEL_FLAG -p "$ADVERSARIAL_PROMPT" -o text 2>"$ERR")
 EXIT=$?
 if [ $EXIT -ne 0 ]; then
   if grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then echo "GEMINI_ERROR: auth"
@@ -656,8 +774,10 @@ Codex `continue` is NOT supported in v1 (`codex exec resume --last` lacks `--out
 2. Extract the follow-up prompt.
 3. Execute:
 ```bash
+MODEL=$(_resolve_model "ask" "gemini")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 ERR=$(mktemp)
-RESP=$(gemini -r latest -p "<follow-up>" -o text 2>"$ERR")
+RESP=$(gemini $MODEL_FLAG -r latest -p "<follow-up>" -o text 2>"$ERR")
 # Standard Gemini error handling (see Error Handling §7) — return 1 on failure
 ```
 Note: Gemini sessions are CWD-scoped.
@@ -716,7 +836,17 @@ rm -f "$ERR"
    - Binary found, API other error → `error`
    - Binary found, API ok → `healthy`
 
-4. **Output:**
+4. **Config check:**
+```bash
+_PROVIDERS_CONFIG="${EMPORIUM_PROVIDERS_CONFIG:-$HOME/.claude/emporium-providers.local.md}"
+if [ -r "$_PROVIDERS_CONFIG" ]; then
+  CONFIG_STATUS="found"
+else
+  CONFIG_STATUS="not found"
+fi
+```
+
+5. **Output:**
 ```
 Arbiter Doctor — Health Check
 
@@ -725,6 +855,8 @@ Arbiter Doctor — Health Check
 | Claude   | ✓ built-in | —       | ✓ ok   | —       |
 | Codex    | ✓ found    | 0.104   | ✓ ok   | 2.3s    |
 | Gemini   | ✓ found    | 0.30    | ✗ auth | —       |
+
+Config: ~/.claude/emporium-providers.local.md (found|not found)
 
 Issues:
 - Gemini: auth expired. Run: gemini login
@@ -955,11 +1087,13 @@ Working directory: ${WT[A]}
 **Bash call (codex) — run_in_background: true:**
 
 ```bash
+MODEL=$(_resolve_model "implement" "codex")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 PROMPT_FILE="${WT[B]}/.dev/diverge-prompt.md"
 ERR="$RUN_DIR/codex-stderr.log"
 
 run_with_timeout "$TIMEOUT" \
-  codex exec --full-auto -C "${WT[B]}" \
+  codex exec --full-auto -C "${WT[B]}" $MODEL_FLAG \
     "$(cat "$PROMPT_FILE")" \
   >"$RUN_DIR/codex-stdout.log" 2>"$ERR"
 CODEX_EXIT=$?
@@ -982,6 +1116,8 @@ fi
 **Bash call (gemini) — run_in_background: true:**
 
 ```bash
+MODEL=$(_resolve_model "implement" "gemini")
+MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 PROMPT_FILE="${WT[C]}/.dev/diverge-prompt.md"
 ERR="$RUN_DIR/gemini-stderr.log"
 
@@ -989,7 +1125,7 @@ ERR="$RUN_DIR/gemini-stderr.log"
 PROMPT=$(cat "$PROMPT_FILE")
 
 run_with_timeout "$TIMEOUT" \
-  sh -c "cd '${WT[C]}' && gemini -p \"\$DIVERGE_PROMPT\" -y -o text" \
+  sh -c "cd '${WT[C]}' && gemini $MODEL_FLAG -p \"\$DIVERGE_PROMPT\" -y -o text" \
   >"$RUN_DIR/gemini-stdout.log" 2>"$ERR"
 GEMINI_EXIT=$?
 # Alternative: export DIVERGE_PROMPT="$PROMPT" before the run_with_timeout call
@@ -1324,6 +1460,8 @@ Examples:
   /arbiter diverge --lite "redesign auth module"
   /arbiter diverge --run-tests "add input validation"
   /arbiter doctor
+
+Config: ~/.claude/emporium-providers.local.md (configure models per task)
 ```
 
 Provider status: run `which codex && codex --version` / `which gemini && gemini --version`. Show checkmark if found, cross if missing.
