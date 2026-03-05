@@ -56,14 +56,14 @@ claude plugin install .
 
 | Command | Description |
 |---------|-------------|
-| `/arbiter review` | Sends the current diff to Codex or Gemini and returns substantive issues; filters style disagreements automatically |
-| `/arbiter panel "<question>"` | Runs both providers in parallel and formats results as Codex \| Gemini \| Claude \| Consensus \| Split |
-| `/arbiter quorum "<decision>"` | Two-round voting (APPROVE/BLOCK/NEEDS_INFO) with Claude synthesis and adversarial tiebreaker |
-| `/arbiter verify "<claim>"` | Three-round cross-check that decomposes a claim into VERIFIED/CONTESTED/REJECTED verdicts |
-| `/arbiter implement "<spec>"` | Delegates a spec to an external AI in a fresh git worktree; returns a diff to review |
-| `/arbiter diverge "<spec>"` | Generates 3 independent implementations in isolated worktrees using different strategy hints, evaluated via anonymized decision matrix |
-| `/arbiter diverge --lite "<spec>"` | Design-only mode — produces design docs instead of code |
-| `/arbiter diverge --run-tests "<spec>"` | Runs existing tests against all three solutions before evaluation |
+| `/arbiter review` | Diff review via Codex or Gemini |
+| `/arbiter panel "<q>"` | Parallel query to both providers |
+| `/arbiter quorum "<q>"` | Two-round vote with tiebreaker |
+| `/arbiter verify "<claim>"` | Three-round cross-check |
+| `/arbiter implement "<spec>"` | External AI in fresh worktree |
+| `/arbiter diverge "<spec>"` | 3 independent implementations |
+| `--lite` | Design docs only (no code) |
+| `--run-tests` | Run tests on all solutions |
 
 ## Features
 
