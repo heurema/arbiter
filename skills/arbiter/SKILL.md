@@ -1,6 +1,7 @@
 ---
+
 name: arbiter
-description: >
+description: Multi-AI orchestrator — dispatch to Codex CLI and Gemini CLI for review, ask, implement, panel, quorum, continue, diverge, and doctor modes. Diverge generates 3 independent implementations in isolated worktrees with different strategy hints, then compares and selects the best solution. Doctor checks provider health and reports partial success when some providers are unavailable.
   Use when user says "/arbiter", "/codex", "ask codex", "ask gemini",
   "codex review", "gemini review", "panel mode", "compare AIs",
   "second opinion from codex", "second opinion from gemini",

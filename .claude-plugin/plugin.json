@@ -1,12 +1,28 @@
 {
-  "name": "arbiter",
-  "description": "Multi-AI orchestrator — dispatch to Codex CLI and Gemini CLI for review, ask, implement, panel, quorum, continue, diverge, and doctor modes. Diverge generates 3 independent implementations in isolated worktrees with different strategy hints, then compares and selects the best solution. Doctor checks provider health and reports partial success when some providers are unavailable.",
-  "version": "0.3.0",
   "author": {
     "name": "heurema"
   },
+  "description": "Multi-AI orchestrator — dispatch to Codex CLI and Gemini CLI for review, ask, implement, panel, quorum, continue, diverge, and doctor modes. Diverge generates 3 independent implementations in isolated worktrees with different strategy hints, then compares and selects the best solution. Doctor checks provider health and reports partial success when some providers are unavailable.",
   "homepage": "https://github.com/heurema/arbiter",
-  "repository": "https://github.com/heurema/arbiter",
+  "keywords": [
+    "ai",
+    "codex",
+    "gemini",
+    "review",
+    "orchestrator",
+    "quorum",
+    "consensus",
+    "verdict",
+    "diverge",
+    "worktree",
+    "parallel-implementation",
+    "compare",
+    "doctor",
+    "health-check",
+    "partial-success"
+  ],
   "license": "MIT",
-  "keywords": ["ai", "codex", "gemini", "review", "orchestrator", "quorum", "consensus", "verdict", "diverge", "worktree", "parallel-implementation", "compare", "doctor", "health-check", "partial-success"]
+  "name": "arbiter",
+  "repository": "https://github.com/heurema/arbiter",
+  "version": "0.4.0"
 }
