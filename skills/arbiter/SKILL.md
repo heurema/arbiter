@@ -118,9 +118,13 @@ MODEL_FLAG=""
 
 NOTE: This version passes task/provider as sys.argv instead of bash string interpolation (addresses the security concern from signum code review).
 
+For Gemini CLI, verified headless model strings in this environment are `auto-gemini-3`, `gemini-3.1-pro-preview`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `pro`, and `flash`. If Gemini 3 preview is not enabled for the account, fall back to `pro` / `flash` or `gemini-2.5-*`.
+
 ### Capability Notes
+- **Claude Code CLI** supports `--model` with aliases like `haiku`, `sonnet`, and `opus`. For nested Claude CLI calls, always sanitize the environment first: `env -u ANTHROPIC_API_KEY -u CLAUDECODE claude ...` so subscription auth is not shadowed by an unrelated API-key env var.
 - **Codex** uses `-p` for profiles (fast, default, full). `-c model_reasoning_effort=high` for reasoning override.
 - **Gemini** uses `-o text` always (not `-o json` — that wraps in transport envelope). `-y` for auto-accept in implement.
+- **Gemini** model IDs should be passed via `--model`. For Gemini 3 routing, prefer verified headless strings like `auto-gemini-3`, `gemini-3.1-pro-preview`, and `gemini-3-flash-preview`. Use `pro` / `flash` or `gemini-2.5-*` as fallback when preview access is unavailable.
 - **Codex review** outputs plain text, never JSON. Always parse as human-readable.
 - **Gemini stderr** is noisy — always capture to tempfile, parse for errors, discard noise.
 
@@ -427,14 +431,14 @@ echo "$RESP"
 ```
 
 3. Collect both results using `TaskOutput` tool (block: true) for each background task ID. Form your own independent analysis.
-4. Present with voting structure:
+4. Present with voting structure. If a provider's response includes a `CONFIDENCE:` line (e.g., from quorum-style prompts or self-assessed), extract and display it. Otherwise omit the confidence annotation.
 ```
 ## Panel: "<question>"
 
-### Codex
+### Codex [Confidence: 0.85]
 [response summary]
 
-### Gemini
+### Gemini [Confidence: 0.70]
 [response summary]
 
 ### Claude — Own Analysis
@@ -444,7 +448,7 @@ echo "$RESP"
 [What all or majority agree on]
 
 ### Split Decision
-[Where they diverge — with Claude's recommendation]
+[Where they diverge — with Claude's recommendation, noting confidence asymmetry if present]
 ```
 
 **Partial failure OK** — if one provider fails, report failure and show the others.
@@ -471,6 +475,7 @@ Quorum always runs both providers. No `--via` flag.
    Respond in EXACTLY this format (no other text):
 
    VERDICT: APPROVE | BLOCK | NEEDS_INFO
+   CONFIDENCE: (0.0–1.0, where 1.0 = absolute certainty in your verdict)
    BLOCKING_ISSUES: (numbered list or "none")
    ASSUMPTIONS: (numbered list)
    EVIDENCE_NEEDED: (what facts would change your verdict)
@@ -480,6 +485,7 @@ Quorum always runs both providers. No `--via` flag.
    - BLOCK if: data loss risk, security vulnerability, irreversible without rollback
    - NEEDS_INFO if: ambiguous, missing context, cannot evaluate
    - APPROVE if: sound, safe, reversible or has rollback plan
+   - CONFIDENCE: 0.9+ = very certain, 0.7-0.9 = confident, 0.5-0.7 = uncertain, <0.5 = low confidence
    ```
 3. Launch Codex + Gemini with `run_in_background: true` (Bash tool `timeout: 120000`) — same patterns as panel mode:
 
@@ -526,24 +532,30 @@ echo "$RESP"
 
 - If provider response doesn't contain `VERDICT:` line → mark as `PARSE_ERROR` (not APPROVE, not N/A)
 - If Bash tool timed out → mark as `TIMEOUT`
+- Extract `CONFIDENCE:` value from each response. Parse as float, clamp to [0.0, 1.0]. If `CONFIDENCE:` line is missing or unparseable → default to 0.5 (neutral confidence)
 - Minimum 1 valid external response required. If both failed → "Quorum unavailable — fewer than 1 external provider responded. Re-run or use /arbiter ask."
 
 #### Round 2 — Claude Synthesis
 
-Claude sees both responses and applies deterministic policy FIRST, then adds analysis.
+Claude sees both responses (including their confidence scores) and applies deterministic policy FIRST, then adds analysis.
 
 **Decision policy (deterministic, applied before LLM synthesis):**
 1. Both BLOCK → final BLOCK
 2. Both APPROVE → final APPROVE
 3. Both NEEDS_INFO → final NEEDS_INFO, consolidate questions
-4. One BLOCK + one APPROVE → **split decision, Claude = tiebreaker**
+4. One BLOCK + one APPROVE → **confidence-weighted split decision** (see below)
 5. Any BLOCK + NEEDS_INFO → final BLOCK (conservative)
 6. One APPROVE + NEEDS_INFO → final NEEDS_INFO
 7. One valid + one failed → present single result with degraded quorum warning
 
-**For split decisions (case 4) — Claude as tiebreaker:**
-Use adversarial prompt: "The providers disagree. Your job: first, state the strongest case FOR the BLOCK. Then state the strongest case AGAINST it. Only then give your tiebreaker verdict with rationale."
-This mitigates confirmation bias by forcing devil's advocate.
+**For split decisions (case 4) — confidence-weighted resolution:**
+Instead of simple tiebreaker, apply confidence weighting first:
+- If the BLOCK provider has confidence ≥ 0.8 AND the APPROVE provider has confidence < 0.5 → final **BLOCK** (high-confidence BLOCK overrides low-confidence APPROVE)
+- If the APPROVE provider has confidence ≥ 0.8 AND the BLOCK provider has confidence < 0.5 → final **APPROVE** (high-confidence APPROVE overrides low-confidence BLOCK)
+- Otherwise (both confident, or both uncertain) → **Claude = tiebreaker** with adversarial prompt
+
+When Claude acts as tiebreaker, use adversarial prompt enriched with confidence context: "The providers disagree. Codex: <VERDICT> (confidence: <score>). Gemini: <VERDICT> (confidence: <score>). Your job: first, state the strongest case FOR the BLOCK. Then state the strongest case AGAINST it. Consider that the <higher-confidence provider> is more certain about their assessment. Only then give your tiebreaker verdict with rationale."
+This mitigates confirmation bias by forcing devil's advocate while surfacing confidence asymmetry.
 
 #### Output Format
 
@@ -552,17 +564,18 @@ This mitigates confirmation bias by forcing devil's advocate.
 
 ### Votes
 
-| Provider | Verdict | Key Issue |
-|----------|---------|-----------|
-| Codex    | BLOCK   | SQL injection in query builder |
-| Gemini   | APPROVE | — |
+| Provider | Verdict | Confidence | Key Issue |
+|----------|---------|------------|-----------|
+| Codex    | BLOCK   | 0.85       | SQL injection in query builder |
+| Gemini   | APPROVE | 0.40       | — |
 
 ### Analysis
 
-[Claude's synthesis: why they disagree, strength of the BLOCK argument, missed risks]
+[Claude's synthesis: why they disagree, strength of the BLOCK argument, missed risks. Note confidence asymmetry if significant (≥0.3 gap)]
 
 ### Verdict: BLOCKED | APPROVED | NEEDS_INFO
-[Rationale based on deterministic policy + Claude analysis]
+[Rationale based on deterministic policy + confidence weighting + Claude analysis]
+[If confidence-weighted resolution applied: "Resolved by confidence weighting: <provider> (<verdict>, confidence <score>) overrides <provider> (<verdict>, confidence <score>)"]
 
 ### Action Items
 [If BLOCK: what to fix. If NEEDS_INFO: what to answer first]
@@ -578,8 +591,8 @@ cat >> ~/vicc/state/quorum-log.md << EOF
 ## <timestamp>
 
 **Question:** <first 3 lines>
-**Result:** BLOCKED (1 BLOCK, 1 APPROVE — tiebreaker: Claude → BLOCK)
-**Votes:** Codex=BLOCK Gemini=APPROVE
+**Result:** BLOCKED (1 BLOCK, 1 APPROVE — confidence-weighted: Codex BLOCK@0.85 overrides Gemini APPROVE@0.40)
+**Votes:** Codex=BLOCK(0.85) Gemini=APPROVE(0.40)
 **Source:** arbiter quorum
 EOF
 fi
@@ -793,17 +806,46 @@ Note: Gemini sessions are CWD-scoped.
 **Flow:**
 1. **Binary checks** (parallel):
 ```bash
+CLAUDE_BIN=$(which claude 2>/dev/null) && CLAUDE_VER=$(claude --version 2>&1 | head -1)
 CODEX_BIN=$(which codex 2>/dev/null) && CODEX_VER=$(codex --version 2>&1 | head -1)
 GEMINI_BIN=$(which gemini 2>/dev/null) && GEMINI_VER=$(gemini --version 2>&1 | head -1)
 ```
 
-2. **Smoke API tests** (parallel, background — two Bash calls with `run_in_background: true`). Note: do NOT use `timeout` command (unavailable on macOS). Use Bash tool's built-in timeout parameter instead:
+2. **Smoke API tests** (parallel, background — three Bash calls with `run_in_background: true`). Note: do NOT use `timeout` command (unavailable on macOS). Use Bash tool's built-in timeout parameter instead:
+
+Claude:
+```bash
+CLAUDE_MODEL=$(_resolve_model "doctor" "claude")
+[ -n "$CLAUDE_MODEL" ] || CLAUDE_MODEL=$(_resolve_model "default" "claude")
+[ -n "$CLAUDE_MODEL" ] || CLAUDE_MODEL="sonnet"
+OUT=$(mktemp); ERR=$(mktemp)
+START=$(date +%s)
+CLAUDE_AUTH_JSON=$(env -u ANTHROPIC_API_KEY -u CLAUDECODE claude auth status 2>/dev/null || true)
+env -u ANTHROPIC_API_KEY -u CLAUDECODE \
+  claude -p --output-format text --model "$CLAUDE_MODEL" \
+  "Reply with exactly: ARBITER_HEALTH_OK" >"$OUT" 2>"$ERR"
+CLAUDE_API_EXIT=$?
+CLAUDE_LATENCY=$(( $(date +%s) - START ))
+CLAUDE_API_RESP=$(cat "$OUT")
+if [ $CLAUDE_API_EXIT -ne 0 ]; then
+  if grep -qi "auth\|login\|403\|401\|credentials\|token\|Invalid API key" "$ERR"; then
+    CLAUDE_API_STATUS="auth_expired"
+  else
+    CLAUDE_API_STATUS="error"
+  fi
+else
+  CLAUDE_API_STATUS="ok"
+fi
+rm -f "$OUT" "$ERR"
+```
 
 Codex:
 ```bash
+CODEX_MODEL=$(_resolve_model "doctor" "codex")
+CODEX_MODEL_FLAG=""; [ -n "$CODEX_MODEL" ] && CODEX_MODEL_FLAG="--model $CODEX_MODEL"
 OUT=$(mktemp); ERR=$(mktemp)
 START=$(date +%s)
-codex exec --ephemeral -p fast \
+codex exec --ephemeral -p fast $CODEX_MODEL_FLAG \
   --output-last-message "$OUT" "Reply with exactly: ARBITER_HEALTH_OK" 2>"$ERR"
 CODEX_API_EXIT=$?
 CODEX_LATENCY=$(( $(date +%s) - START ))
@@ -812,9 +854,11 @@ CODEX_API_RESP=$(cat "$OUT"); rm -f "$OUT" "$ERR"
 
 Gemini:
 ```bash
+GEMINI_MODEL=$(_resolve_model "doctor" "gemini")
+GEMINI_MODEL_FLAG=""; [ -n "$GEMINI_MODEL" ] && GEMINI_MODEL_FLAG="--model $GEMINI_MODEL"
 ERR=$(mktemp)
 START=$(date +%s)
-GEMINI_API_RESP=$(gemini -p "Reply with exactly: ARBITER_HEALTH_OK" -o text 2>"$ERR")
+GEMINI_API_RESP=$(gemini $GEMINI_MODEL_FLAG -p "Reply with exactly: ARBITER_HEALTH_OK" -o text 2>"$ERR")
 GEMINI_API_EXIT=$?
 GEMINI_LATENCY=$(( $(date +%s) - START ))
 if [ $GEMINI_API_EXIT -ne 0 ]; then
@@ -850,16 +894,17 @@ fi
 ```
 Arbiter Doctor — Health Check
 
-| Provider | Binary     | Version | API    | Latency |
-|----------|------------|---------|--------|---------|
-| Claude   | ✓ built-in | —       | ✓ ok   | —       |
-| Codex    | ✓ found    | 0.104   | ✓ ok   | 2.3s    |
-| Gemini   | ✓ found    | 0.30    | ✗ auth | —       |
+| Provider | Binary     | Version | Model  | API    | Latency |
+|----------|------------|---------|--------|--------|---------|
+| Claude   | ✓ found    | 2.1.71  | sonnet | ✓ ok   | 3.1s    |
+| Codex    | ✓ found    | 0.104   | gpt-5.3-codex | ✓ ok   | 2.3s    |
+| Gemini   | ✓ found    | 0.30    | auto-gemini-3 | ✗ auth | —       |
 
 Config: ~/.claude/emporium-providers.local.md (found|not found)
 
 Issues:
 - Gemini: auth expired. Run: gemini login
+- Claude: nested CLI auth is sanitized automatically by unsetting `ANTHROPIC_API_KEY` and `CLAUDECODE`
 
 Overall: PARTIAL (2/3 providers healthy)
 ```
@@ -881,7 +926,7 @@ If both missing: "No external providers found. Install codex or gemini to use mu
 2. Freeze spec + context into a Problem Pack
 3. Create 3 isolated worktrees (detached, run-scoped)
 4. Write prompt files per worktree (with strategy hints)
-5. Dispatch Claude (sonnet subagent), Codex, and Gemini in parallel
+5. Dispatch Claude (configurable model, default `sonnet`), Codex, and Gemini in parallel
 6. Staged evaluation: Pass 1 (stats + cards), Pass 2 (full diff on demand)
 7. Decision Matrix via separate anonymized evaluator
 8. User selects → merge only the chosen solution
@@ -1076,10 +1121,18 @@ except subprocess.TimeoutExpired:
 
 Exit code 124 = timeout (matches GNU `timeout` convention). Default `$TIMEOUT` = 300 (configurable via `--timeout`).
 
-**Claude (sonnet subagent) — run_in_background: true:**
+**Claude subagent (configurable model, default `sonnet`) — run_in_background: true:**
+
+Resolve Claude model before dispatch:
+
+```bash
+CLAUDE_IMPLEMENT_MODEL=$(_resolve_model "implement" "claude")
+[ -n "$CLAUDE_IMPLEMENT_MODEL" ] || CLAUDE_IMPLEMENT_MODEL=$(_resolve_model "default" "claude")
+[ -n "$CLAUDE_IMPLEMENT_MODEL" ] || CLAUDE_IMPLEMENT_MODEL="sonnet"
+```
 
 ```
-subagent_type="general-purpose", model="sonnet", run_in_background=true
+subagent_type="general-purpose", model="$CLAUDE_IMPLEMENT_MODEL", run_in_background=true
 Prompt: contents of ${WT[A]}/.dev/diverge-prompt.md
 Working directory: ${WT[A]}
 ```
@@ -1233,8 +1286,16 @@ A solution that fails existing tests gets Correctness score capped at 1. Test re
 
 The evaluator is a **separate Claude invocation** — NOT the orchestrator (mitigates self-preference bias):
 
+Resolve evaluator model before dispatch:
+
+```bash
+CLAUDE_EVAL_MODEL=$(_resolve_model "evaluate" "claude")
+[ -n "$CLAUDE_EVAL_MODEL" ] || CLAUDE_EVAL_MODEL=$(_resolve_model "default" "claude")
+[ -n "$CLAUDE_EVAL_MODEL" ] || CLAUDE_EVAL_MODEL="sonnet"
 ```
-subagent_type="general-purpose", model="sonnet" (or opus if risk=high)
+
+```
+subagent_type="general-purpose", model="$CLAUDE_EVAL_MODEL"
 run_in_background=false
 ```
 

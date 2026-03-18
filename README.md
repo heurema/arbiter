@@ -76,23 +76,32 @@ claude plugin install .
 
 ## Provider Configuration (optional)
 
-Create `~/.claude/emporium-providers.local.md` to customize which models Codex and Gemini use:
+Create `~/.claude/emporium-providers.local.md` to customize which models Claude, Codex, and Gemini use per task:
 
 ```yaml
 ---
 version: 1
 defaults:
+  claude:
+    model: "sonnet"
   codex:
     model: "gpt-5.3-codex"
   gemini:
-    model: "gemini-3.1-pro"
+    model: "auto-gemini-3"
 routing:
+  doctor:
+    claude: "haiku"
   review:
-    gemini: "gemini-3-flash"
+    gemini: "gemini-3-flash-preview"
+  implement:
+    claude: "sonnet"
+    gemini: "gemini-3.1-pro-preview"
+  evaluate:
+    claude: "opus"
 ---
 ```
 
-Without this file, arbiter uses each CLI's default model. See `forge doctor` to validate your config.
+Without this file, arbiter uses each CLI's default model, with Claude diverge/evaluator falling back to `sonnet`. Verified Gemini headless strings in this environment are `auto-gemini-3`, `gemini-3.1-pro-preview`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `pro`, and `flash`. If Gemini 3 preview is not enabled for your account, use `pro` / `flash` or `gemini-2.5-*` instead. For nested Claude CLI calls, arbiter should unset `ANTHROPIC_API_KEY` and `CLAUDECODE` so subscription auth is used reliably. See `forge doctor` and `/arbiter doctor` to validate your setup.
 
 ## Requirements
 
@@ -106,7 +115,7 @@ Without this file, arbiter uses each CLI's default model. See `forge doctor` to 
 
 ## Privacy
 
-Arbiter invokes Codex CLI and Gemini CLI as local processes. Your diff and prompt text are sent to those providers under their own terms of service and authentication — the same as running the CLIs directly. Arbiter itself does not transmit data to any additional endpoint. No API keys are stored by Arbiter.
+Arbiter invokes Claude Code, Codex CLI, and Gemini CLI as local processes or subagents. Your diff and prompt text are sent to those providers under their own terms of service and authentication — the same as running the CLIs directly. Arbiter itself does not transmit data to any additional endpoint. No API keys are stored by Arbiter.
 
 ## See also
 

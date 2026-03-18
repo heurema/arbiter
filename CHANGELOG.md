@@ -3,6 +3,18 @@
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- Configurable Claude model routing for diverge implementation and evaluator stages
+- Reliable nested Claude CLI invocation guidance using sanitized auth environment
+- Task-specific model configuration examples for Claude and Gemini
+- Verified Gemini 3 headless routing strings documented: `auto-gemini-3`, `gemini-3.1-pro-preview`, and `gemini-3-flash-preview`
+
+### Fixed
+- Documentation now consistently describes provider config as applying to Claude, Codex, and Gemini
+- Reference docs no longer incorrectly claim that Arbiter has no configuration file
+
 ## [0.3.0] - 2026-03-01
 
 ### Added

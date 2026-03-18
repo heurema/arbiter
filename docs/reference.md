@@ -145,7 +145,7 @@ Generates three independent implementations in parallel, each in an isolated git
 
 | Strategy | Hint | Default provider |
 |----------|------|-----------------|
-| `minimal` | Smallest possible change; minimize lines, files, and new dependencies | Claude (sonnet subagent) |
+| `minimal` | Smallest possible change; minimize lines, files, and new dependencies | Claude (configurable, default `sonnet`) |
 | `refactor` | Improve existing structure; extract helpers, rename for clarity, improve testability | Codex (GPT) |
 | `redesign` | Best possible abstraction; may introduce new modules or patterns | Gemini |
 
@@ -210,7 +210,52 @@ After the user selects, Arbiter reveals which provider produced each solution.
 
 ## Configuration
 
-Arbiter reads no configuration file. All behavior is controlled by the mode and inline options. Provider selection follows these defaults:
+Arbiter reads `~/.claude/emporium-providers.local.md` when present. Use it to route Claude, Codex, and Gemini to different models per task. If the file is absent, Arbiter falls back to CLI defaults, with Claude diverge/evaluator using `sonnet`.
+
+Example:
+
+```yaml
+---
+version: 1
+defaults:
+  claude:
+    model: "sonnet"
+  codex:
+    model: "gpt-5.3-codex"
+  gemini:
+    model: "auto-gemini-3"
+routing:
+  doctor:
+    claude: "haiku"
+  review:
+    gemini: "gemini-3-flash-preview"
+  implement:
+    claude: "sonnet"
+    gemini: "gemini-3.1-pro-preview"
+  evaluate:
+    claude: "opus"
+---
+```
+
+Verified Gemini headless model strings in this environment:
+
+- `auto-gemini-3`
+- `gemini-3.1-pro-preview`
+- `gemini-3-flash-preview`
+- `gemini-2.5-pro`
+- `gemini-2.5-flash`
+- `pro`
+- `flash`
+
+If Gemini 3 preview is not enabled for your account, use `pro` / `flash` or `gemini-2.5-*` instead.
+
+Nested Claude CLI calls should sanitize auth environment:
+
+```bash
+env -u ANTHROPIC_API_KEY -u CLAUDECODE claude -p --model sonnet ...
+```
+
+Provider selection still follows these mode defaults:
 
 | Mode | Default provider | Alternate |
 |------|-----------------|-----------|
@@ -249,7 +294,7 @@ Install Codex CLI from [github.com/openai/codex](https://github.com/openai/codex
 Install Gemini CLI from [github.com/google-gemini/gemini-cli](https://github.com/google-gemini/gemini-cli) and ensure it is on your `$PATH`. Run `gemini --version` to verify.
 
 **Authentication error**
-Run the provider CLI manually to re-authenticate (`codex auth` or `gemini auth`). Arbiter uses whichever credentials the CLI already has.
+Run the provider CLI manually to re-authenticate (`codex auth`, `gemini login`, or `claude auth login`). Arbiter uses whichever credentials the CLI already has. For nested Claude CLI calls, remove conflicting API-key env vars first: `env -u ANTHROPIC_API_KEY -u CLAUDECODE claude ...`
 
 **Timeout after 120 seconds**
 The provider took too long to respond. For large diffs, try `--gemini` for `review` (Gemini handles large context well via chunking). For `implement`, break the spec into smaller tasks.

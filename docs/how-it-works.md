@@ -12,7 +12,7 @@ Arbiter is a single-skill Claude Code plugin. The entire implementation lives in
 
 **Gemini CLI** — external process invoked via shell. Used as the secondary provider in `panel`, `quorum`, `verify`, and for `review` via diff pipe. For `continue`, Gemini is the only provider because it maintains session state; Codex does not support session continuation in v1. In `diverge`, Gemini runs as the third agent in its own isolated worktree.
 
-**Claude (sonnet subagent)** — launched by the orchestrator as a background subagent in `diverge` mode. Claude acts as the first of three parallel implementers, working in its own isolated worktree with the `minimal` strategy hint by default. The orchestrator and the subagent are separate invocations; the evaluator that scores solutions is a third, separate Claude invocation to mitigate self-preference bias.
+**Claude (configurable subagent / CLI)** — launched by the orchestrator as a background subagent in `diverge` mode and as a nested CLI process in `doctor` mode. Claude acts as the first of three parallel implementers, working in its own isolated worktree with the `minimal` strategy hint by default. The model is resolved from `emporium-providers.local.md` when configured, otherwise falls back to `sonnet`. Nested Claude CLI calls must unset `ANTHROPIC_API_KEY` and `CLAUDECODE` so subscription auth is used reliably.
 
 **Git** — used by `review` (to produce the diff), `implement` (to create and manage an isolated worktree), and `diverge` (to create three isolated detached worktrees and merge the selected solution).
 
@@ -42,7 +42,7 @@ User → /arbiter <mode> [args]
               ├─ create 3 isolated detached worktrees (A, B, C)
               ├─ write strategy-hint prompt files per worktree
               ├─ dispatch 3 agents in parallel (run_in_background: true):
-              │    ├─ Agent A: Claude sonnet subagent (minimal)
+              │    ├─ Agent A: Claude subagent (configurable model, default sonnet) (minimal)
               │    ├─ Agent B: Codex CLI (refactor)
               │    └─ Agent C: Gemini CLI (redesign)
               ├─ staged evaluation:
@@ -60,18 +60,18 @@ For `quorum`, there are two rounds. Round 1: independent votes. Round 2: each pr
 
 For `verify`, there are three rounds: independent answers, claim comparison to identify contested points, and adversarial cross-check where each provider challenges the other's contested claims. Output is per-claim verdicts.
 
-For `diverge`, all three agents run as background tasks simultaneously. Agents do not commit — all changes remain as uncommitted modifications in the worktree. The evaluator is a separate Claude invocation that receives anonymized solution labels (Solution 1/2/3) with no provider names, to prevent model-preference bias. Weighted totals are computed via bash arithmetic, not by the LLM.
+For `diverge`, all three agents run as background tasks simultaneously. Agents do not commit — all changes remain as uncommitted modifications in the worktree. The evaluator is a separate Claude invocation that receives anonymized solution labels (Solution 1/2/3) with no provider names, to prevent model-preference bias. Both the diverge implementer model and the evaluator model can be routed independently through `emporium-providers.local.md`. Weighted totals are computed via bash arithmetic, not by the LLM.
 
 ## Trust Boundaries
 
-Arbiter's trust boundary is the boundary of your existing Codex CLI and Gemini CLI installations.
+Arbiter's trust boundary is the boundary of your existing Claude Code, Codex CLI, and Gemini CLI installations.
 
 - Arbiter does not call any API directly.
 - Diff content and prompt text travel to the respective AI provider via the same channel as invoking the CLI manually.
 - No data is stored by Arbiter. No telemetry is collected.
 - Arbiter does not write to disk except when `implement` or `diverge` creates worktrees (standard git behavior).
 
-You should apply the same data-handling policy to Arbiter that you apply to running Codex CLI or Gemini CLI directly.
+You should apply the same data-handling policy to Arbiter that you apply to running Claude Code, Codex CLI, or Gemini CLI directly.
 
 ### Diverge-Specific Trust Boundaries
 
