@@ -1,19 +1,20 @@
-# Arbiter
+```
+              __    _ __
+  ____ ______/ /_  (_) /____  _____
+ / __ `/ ___/ __ \/ / __/ _ \/ ___/
+/ /_/ / /  / /_/ / / /_/  __/ /
+\__,_/_/  /_.___/_/\__/\___/_/
+```
 
-<div align="center">
-
-**Route decisions through independent AI reviewers**
+**Route decisions through independent AI reviewers.**
 
 [![Claude Code Plugin](https://img.shields.io/badge/Claude%20Code-Plugin-5b21b6?style=flat-square)](https://skill7.dev/plugins/arbiter)
 [![Version](https://img.shields.io/badge/version-0.3.0-5b21b6?style=flat-square)](https://github.com/heurema/arbiter)
-[![License MIT](https://img.shields.io/badge/license-MIT-5b21b6?style=flat-square)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-```bash
-claude plugin marketplace add heurema/emporium
-claude plugin install arbiter@emporium
-```
+> Quick second opinion on a diff or a formal two-round quorum vote with adversarial tiebreaker — via Codex CLI and Gemini CLI.
 
-</div>
+---
 
 ## What it does
 
