@@ -1186,12 +1186,9 @@ MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 PROMPT_FILE="${WT[C]}/.dev/diverge-prompt.md"
 ERR="$RUN_DIR/gemini-stderr.log"
 
-# Load prompt into variable and export for subshell access
-PROMPT=$(cat "$PROMPT_FILE")
-export PROMPT
-
+# Pipe prompt via stdin to avoid ARG_MAX / env size limits
 run_with_timeout "$TIMEOUT" \
-  sh -c "cd '${WT[C]}' && gemini $MODEL_FLAG -p \"\$PROMPT\" -y -o text" \
+  sh -c "cd '${WT[C]}' && cat '$PROMPT_FILE' | gemini $MODEL_FLAG -y -o text" \
   >"$RUN_DIR/gemini-stdout.log" 2>"$ERR"
 GEMINI_EXIT=$?
 
