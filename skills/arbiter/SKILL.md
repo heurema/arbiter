@@ -1184,14 +1184,14 @@ MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 PROMPT_FILE="${WT[C]}/.dev/diverge-prompt.md"
 ERR="$RUN_DIR/gemini-stderr.log"
 
-# Load prompt into variable first — single quotes block expansion
+# Load prompt into variable and export for subshell access
 PROMPT=$(cat "$PROMPT_FILE")
+export PROMPT
 
 run_with_timeout "$TIMEOUT" \
-  sh -c "cd '${WT[C]}' && gemini $MODEL_FLAG -p \"\$DIVERGE_PROMPT\" -y -o text" \
+  sh -c "cd '${WT[C]}' && gemini $MODEL_FLAG -p \"\$PROMPT\" -y -o text" \
   >"$RUN_DIR/gemini-stdout.log" 2>"$ERR"
 GEMINI_EXIT=$?
-# Alternative: export DIVERGE_PROMPT="$PROMPT" before the run_with_timeout call
 
 if [ $GEMINI_EXIT -ne 0 ]; then
   if grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then
