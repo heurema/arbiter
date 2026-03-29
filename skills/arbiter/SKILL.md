@@ -1259,16 +1259,24 @@ git -C "${WT[$SELECTED]}" diff "$BASE_COMMIT"
 Before running tests, verify a test suite exists:
 
 ```bash
-# Check HAS_TESTS — look for common test runner configs
+# Detect test runner and set TEST_COMMAND
 HAS_TESTS=false
-for RUNNER in pytest jest go npm; do
-  if command -v "$RUNNER" &>/dev/null; then HAS_TESTS=true; break; fi
-done
-# Also check for test files
-if ls tests/ &>/dev/null || ls test/ &>/dev/null; then HAS_TESTS=true; fi
+TEST_COMMAND=""
+if [ -f "package.json" ] && command -v npm &>/dev/null; then
+  HAS_TESTS=true; TEST_COMMAND="npm test"
+elif [ -f "pytest.ini" ] || [ -f "setup.cfg" ] || [ -f "pyproject.toml" ] && command -v pytest &>/dev/null; then
+  HAS_TESTS=true; TEST_COMMAND="pytest"
+elif [ -f "go.mod" ] && command -v go &>/dev/null; then
+  HAS_TESTS=true; TEST_COMMAND="go test ./..."
+elif ls tests/ &>/dev/null || ls test/ &>/dev/null; then
+  # Test files exist but no runner detected
+  if command -v pytest &>/dev/null; then HAS_TESTS=true; TEST_COMMAND="pytest"
+  elif command -v jest &>/dev/null; then HAS_TESTS=true; TEST_COMMAND="jest"
+  fi
+fi
 ```
 
-If `HAS_TESTS=false` → mark `Tests: not run` in decision matrix (do not error).
+If `HAS_TESTS=false` or `TEST_COMMAND` is empty → mark `Tests: not run` in decision matrix (do not error).
 
 If test suite found:
 
