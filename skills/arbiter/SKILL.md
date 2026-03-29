@@ -1560,7 +1560,7 @@ Before every provider call, show the effective command:
 1. **Binary not found** → "<provider> not found in PATH. Install: <url>"
    - codex: https://github.com/openai/codex
    - gemini: https://github.com/google-gemini/gemini-cli
-2. **Auth error** → parse stderr for auth keywords (auth, login, 403, 401, credentials). Message: "Run `codex login` / `gemini login`"
+2. **Auth error** → parse stderr for auth keywords (auth, login, 403, 401, credentials). Message: "Run `codex auth` / `gemini login`"
 3. **Timeout** → 120s per provider. Kill and report partial output with `[TIMEOUT]` marker.
 4. **No changes for review** → check `git diff --stat` first, stop early.
 5. **Large diff** → if >300 lines, MUST chunk by file for gemini (codex handles natively).
