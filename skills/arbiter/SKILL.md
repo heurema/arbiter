@@ -222,8 +222,18 @@ NOTE: `codex review` does NOT support `-p` (profile). Use `-c` for overrides. `-
 
 **Gemini (--via gemini):**
 ```bash
-# Check diff size first
-DIFF_LINES=$(git diff | wc -l)
+# Determine diff source — include both unstaged and staged changes
+# --base and --commit override the default diff source
+if [ -n "$BASE" ]; then
+  DIFF_CMD="git diff ${BASE}...HEAD"
+elif [ -n "$COMMIT" ]; then
+  DIFF_CMD="git diff ${COMMIT}~1..${COMMIT}"
+else
+  # Default: unstaged + staged combined
+  DIFF_CMD="git diff HEAD"
+fi
+
+DIFF_LINES=$(eval "$DIFF_CMD" | wc -l)
 if [ "$DIFF_LINES" -eq 0 ]; then echo "No changes to review."; exit 0; fi
 
 MODEL=$(_resolve_model "review" "gemini")
@@ -231,22 +241,20 @@ MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 ERR=$(mktemp)
 
 # Small diff (<300 lines) — single call
-RESP=$(git diff | gemini $MODEL_FLAG -p "You are a code reviewer. Review the diff on stdin. \
+RESP=$(eval "$DIFF_CMD" | gemini $MODEL_FLAG -p "You are a code reviewer. Review the diff on stdin. \
 Report ONLY: bugs, security issues, performance problems. Skip style. \
 Format: list each finding as '- [file:line] severity: description'" -o text 2>"$ERR")
 # Standard Gemini error handling (see Error Handling §7) — exit 1 on failure
 
 
 # Large diff (>300 lines) — MUST chunk by file
-for FILE in $(git diff --name-only); do
-  RESP=$(git diff -- "$FILE" | gemini $MODEL_FLAG -p "Review this diff for $FILE. Report bugs, security, performance only." -o text 2>/dev/null)
+ERR_CHUNK=$(mktemp)
+eval "$DIFF_CMD" --name-only -z | while IFS= read -r -d '' FILE; do
+  RESP=$(eval "$DIFF_CMD" -- "$FILE" | gemini $MODEL_FLAG -p "Review this diff for $FILE. Report bugs, security, performance only." -o text 2>"$ERR_CHUNK")
+  # Standard Gemini error handling per chunk
   # collect per-file findings
 done
-```
-
-For `--base main`:
-```bash
-git diff main...HEAD | gemini $MODEL_FLAG -p "<review prompt>" -o text 2>"$ERR"
+rm -f "$ERR_CHUNK"
 ```
 
 6. Parse findings into categories:
