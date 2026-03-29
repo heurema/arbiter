@@ -592,20 +592,7 @@ This mitigates confirmation bias by forcing devil's advocate while surfacing con
 
 #### Logging
 
-Append to `~/vicc/state/quorum-log.md` conditionally (if dir exists):
-```bash
-if [ -d ~/vicc/state ]; then
-cat >> ~/vicc/state/quorum-log.md << EOF
-
-## <timestamp>
-
-**Question:** <first 3 lines>
-**Result:** BLOCKED (1 BLOCK, 1 APPROVE — confidence-weighted: Codex BLOCK@0.85 overrides Gemini APPROVE@0.40)
-**Votes:** Codex=BLOCK(0.85) Gemini=APPROVE(0.40)
-**Source:** arbiter quorum
-EOF
-fi
-```
+Quorum does not persist any data to disk. Prompt content and verdicts remain in the conversation context only. This is consistent with Arbiter's trust boundary: "No data is stored by Arbiter."
 
 ---
 
@@ -768,20 +755,7 @@ Thresholds:
 
 #### Logging
 
-Same pattern as quorum — append to `~/vicc/state/quorum-log.md` conditionally (if dir exists):
-```bash
-if [ -d ~/vicc/state ]; then
-cat >> ~/vicc/state/quorum-log.md << EOF
-
-## <timestamp>
-
-**Question:** <first 3 lines>
-**Result:** <confidence> (X verified, Y contested, Z rejected)
-**Rounds:** <2 or 3>
-**Source:** arbiter verify
-EOF
-fi
-```
+Verify does not persist any data to disk. Same policy as quorum — no data stored.
 
 ---
 
