@@ -360,8 +360,9 @@ RESP=$(git diff | gemini $MODEL_FLAG -p "<prompt>" -o text 2>"$ERR")
 2. Verify we're in a git repository. If not → stop.
 3. Create an isolated worktree:
 ```bash
-BRANCH="arbiter/$(date +%s)"
-git worktree add "/tmp/$BRANCH" -b "$BRANCH" HEAD
+BRANCH="arbiter-$(date +%s)-$$"
+WORKTREE=$(mktemp -d "/tmp/arbiter-XXXXXX")
+git worktree add "$WORKTREE" -b "$BRANCH" HEAD
 ```
 4. Show effective command, then execute:
 
@@ -369,7 +370,7 @@ git worktree add "/tmp/$BRANCH" -b "$BRANCH" HEAD
 ```bash
 MODEL=$(_resolve_model "implement" "codex")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
-codex exec --full-auto -C "/tmp/$BRANCH" $MODEL_FLAG "<spec>" 2>&1
+codex exec --full-auto -C "$WORKTREE" $MODEL_FLAG "<spec>" 2>&1
 ```
 
 **Gemini (--via gemini):**
@@ -378,7 +379,7 @@ MODEL=$(_resolve_model "implement" "gemini")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 ERR=$(mktemp)
 # IMPORTANT: subshell to avoid changing Claude's CWD
-(cd "/tmp/$BRANCH" && gemini $MODEL_FLAG -p "<spec>" -y -o text 2>"$ERR")
+(cd "$WORKTREE" && gemini $MODEL_FLAG -p "<spec>" -y -o text 2>"$ERR")
 GEMINI_EXIT=$?
 if [ $GEMINI_EXIT -ne 0 ]; then
   if grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then
@@ -393,7 +394,7 @@ rm -f "$ERR"
 5. Capture output and check exit code.
 6. Show the diff:
 ```bash
-git -C "/tmp/$BRANCH" diff HEAD
+git -C "$WORKTREE" diff HEAD
 ```
 7. Present results:
 ```
@@ -415,13 +416,13 @@ git -C "/tmp/$BRANCH" diff HEAD
 ```
 8. If merge:
 ```bash
-git -C "/tmp/$BRANCH" add -A && git -C "/tmp/$BRANCH" commit -m "arbiter: <spec summary>"
+git -C "$WORKTREE" add -A && git -C "$WORKTREE" commit -m "arbiter: <spec summary>"
 git merge "$BRANCH"
-git worktree remove "/tmp/$BRANCH"
+git worktree remove "$WORKTREE"
 ```
 9. If discard:
 ```bash
-git worktree remove --force "/tmp/$BRANCH"
+git worktree remove --force "$WORKTREE"
 git branch -D "$BRANCH"
 ```
 10. On ANY error, always clean up worktree. Remind user: `git worktree list | grep arbiter/` for manual cleanup.
