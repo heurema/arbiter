@@ -1414,6 +1414,10 @@ git merge --no-ff "$SELECTED_BRANCH"
 
 Save report to `.dev/diverge-report.md` for audit trail. Append selection metadata.
 
+```bash
+mkdir -p .dev
+```
+
 Append JSONL metrics artifact (append-only, per-run stats):
 ```bash
 cat >> .dev/diverge-metrics.jsonl <<EOF
