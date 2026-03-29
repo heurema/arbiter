@@ -9,7 +9,7 @@
 **Route decisions through independent AI reviewers.**
 
 [![Claude Code Plugin](https://img.shields.io/badge/Claude%20Code-Plugin-5b21b6?style=flat-square)](https://skill7.dev/plugins/arbiter)
-[![Version](https://img.shields.io/badge/version-0.3.0-5b21b6?style=flat-square)](https://github.com/heurema/arbiter)
+[![Version](https://img.shields.io/github/v/tag/heurema/arbiter?label=version&style=flat-square&color=5b21b6)](https://github.com/heurema/arbiter)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 > Quick second opinion on a diff or a formal two-round quorum vote with adversarial tiebreaker — via Codex CLI and Gemini CLI.
