@@ -558,11 +558,10 @@ Claude sees both responses (including their confidence scores) and applies deter
 6. One APPROVE + NEEDS_INFO → final NEEDS_INFO
 7. One valid + one failed → present single result with degraded quorum warning
 
-**For split decisions (case 4) — confidence-weighted resolution:**
-Instead of simple tiebreaker, apply confidence weighting first:
-- If the BLOCK provider has confidence ≥ 0.8 AND the APPROVE provider has confidence < 0.5 → final **BLOCK** (high-confidence BLOCK overrides low-confidence APPROVE)
-- If the APPROVE provider has confidence ≥ 0.8 AND the BLOCK provider has confidence < 0.5 → final **APPROVE** (high-confidence APPROVE overrides low-confidence BLOCK)
-- Otherwise (both confident, or both uncertain) → **Claude = tiebreaker** with adversarial prompt
+**For split decisions (case 4) — conservative resolution:**
+A BLOCK is a safety signal — confidence weighting must not auto-override it:
+- If the BLOCK provider has confidence ≥ 0.8 → final **BLOCK** (high-confidence BLOCK is authoritative)
+- Otherwise → **Claude = tiebreaker** with adversarial prompt (BLOCK can only be overridden after explicit adversarial analysis, never by confidence score alone)
 
 When Claude acts as tiebreaker, use adversarial prompt enriched with confidence context: "The providers disagree. Codex: <VERDICT> (confidence: <score>). Gemini: <VERDICT> (confidence: <score>). Your job: first, state the strongest case FOR the BLOCK. Then state the strongest case AGAINST it. Consider that the <higher-confidence provider> is more certain about their assessment. Only then give your tiebreaker verdict with rationale."
 This mitigates confirmation bias by forcing devil's advocate while surfacing confidence asymmetry.
