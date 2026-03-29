@@ -7,8 +7,9 @@
 Sends the current git diff to an external AI for an independent code review. Codex is the default provider. Pass the diff to Gemini instead by piping.
 
 **Options**
-- `--gemini` — use Gemini CLI instead of Codex
-- `--with-diff` — always include diff even if the provider already sees it from context (useful for `ask`)
+- `--via gemini` — use Gemini CLI instead of Codex
+- `--base <branch>` — review PR diff against a base branch
+- `--commit <sha>` — review a specific commit
 
 **Output**
 A structured review with: Summary, Issues (severity: critical/major/minor), Suggestions. Style disagreements are filtered and not reported.
@@ -16,14 +17,14 @@ A structured review with: Summary, Issues (severity: critical/major/minor), Sugg
 **Example**
 ```
 /arbiter review
-/arbiter review --gemini
+/arbiter review --via gemini
 ```
 
 ---
 
 ### `/arbiter ask "question"`
 
-Gets an external AI opinion on a question. Both Codex and Gemini perspectives are presented when relevant context differs. Use `--with-diff` to include the current diff as context.
+Gets an external AI opinion on a question from a single provider (default: Codex). Use `--via gemini` for Gemini. For multi-provider comparison, use `/arbiter panel` instead. Use `--with-diff` to include the current diff as context.
 
 **Options**
 - `--with-diff` — attach current git diff to the prompt
@@ -76,18 +77,16 @@ Consensus is populated when all three agree. Split lists the points of divergenc
 
 ### `/arbiter quorum "proposal"`
 
-Formal two-round go/no-go gate.
+Formal go/no-go gate with independent provider votes and Claude synthesis.
 
-**Round 1:** Codex and Gemini each vote independently: APPROVE, BLOCK, or NEEDS_INFO with reasoning.
-
-**Round 2:** Each provider sees the other's vote and reasoning, then may revise.
+**Voting:** Codex and Gemini each vote independently: APPROVE, BLOCK, or NEEDS_INFO with reasoning and confidence score.
 
 **Synthesis:** Claude applies the deterministic policy:
 - Unanimous APPROVE → go
-- Any BLOCK → no-go
+- Any high-confidence BLOCK → no-go
 - Split or NEEDS_INFO → escalate with summary of concerns
 
-An adversarial tiebreaker is applied when votes are split after round 2.
+An adversarial tiebreaker is applied when votes are split and the BLOCK confidence is below threshold.
 
 **Examples**
 ```
@@ -259,7 +258,7 @@ Provider selection still follows these mode defaults:
 
 | Mode | Default provider | Alternate |
 |------|-----------------|-----------|
-| review | Codex | `--gemini` flag |
+| review | Codex | `--via gemini` flag |
 | ask | Codex | automatic (both for panel-style questions) |
 | implement | Codex | — |
 | panel | Both | — |
@@ -297,7 +296,7 @@ Install Gemini CLI from [github.com/google-gemini/gemini-cli](https://github.com
 Run the provider CLI manually to re-authenticate (`codex auth`, `gemini login`, or `claude auth login`). Arbiter uses whichever credentials the CLI already has. For nested Claude CLI calls, remove conflicting API-key env vars first: `env -u ANTHROPIC_API_KEY -u CLAUDECODE claude ...`
 
 **Timeout after 120 seconds**
-The provider took too long to respond. For large diffs, try `--gemini` for `review` (Gemini handles large context well via chunking). For `implement`, break the spec into smaller tasks.
+The provider took too long to respond. For large diffs, try `--via gemini` for `review` (Gemini handles large context well via chunking). For `implement`, break the spec into smaller tasks.
 
 **Large diff warning (Gemini)**
 Diffs over 300 lines are automatically chunked and sent to Gemini sequentially. This increases latency but prevents context overflow errors. No action required.

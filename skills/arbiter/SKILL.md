@@ -222,8 +222,20 @@ NOTE: `codex review` does NOT support `-p` (profile). Use `-c` for overrides. `-
 
 **Gemini (--via gemini):**
 ```bash
-# Check diff size first
-DIFF_LINES=$(git diff | wc -l)
+# Determine diff source — include both unstaged and staged changes
+# Validate refs before use to prevent bad-ref failures showing as empty diffs
+if [ -n "$BASE" ]; then
+  git rev-parse --verify "$BASE" >/dev/null 2>&1 || { echo "Error: invalid base ref '$BASE'"; exit 1; }
+  DIFF_ARGS=("${BASE}...HEAD")
+elif [ -n "$COMMIT" ]; then
+  git rev-parse --verify "$COMMIT" >/dev/null 2>&1 || { echo "Error: invalid commit '$COMMIT'"; exit 1; }
+  DIFF_ARGS=("${COMMIT}~1..${COMMIT}")
+else
+  # Default: unstaged + staged combined
+  DIFF_ARGS=("HEAD")
+fi
+
+DIFF_LINES=$(git diff "${DIFF_ARGS[@]}" | wc -l)
 if [ "$DIFF_LINES" -eq 0 ]; then echo "No changes to review."; exit 0; fi
 
 MODEL=$(_resolve_model "review" "gemini")
@@ -231,22 +243,20 @@ MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 ERR=$(mktemp)
 
 # Small diff (<300 lines) — single call
-RESP=$(git diff | gemini $MODEL_FLAG -p "You are a code reviewer. Review the diff on stdin. \
+RESP=$(git diff "${DIFF_ARGS[@]}" | gemini $MODEL_FLAG -p "You are a code reviewer. Review the diff on stdin. \
 Report ONLY: bugs, security issues, performance problems. Skip style. \
 Format: list each finding as '- [file:line] severity: description'" -o text 2>"$ERR")
 # Standard Gemini error handling (see Error Handling §7) — exit 1 on failure
 
 
 # Large diff (>300 lines) — MUST chunk by file
-for FILE in $(git diff --name-only); do
-  RESP=$(git diff -- "$FILE" | gemini $MODEL_FLAG -p "Review this diff for $FILE. Report bugs, security, performance only." -o text 2>/dev/null)
+ERR_CHUNK=$(mktemp)
+git diff "${DIFF_ARGS[@]}" --name-only -z | while IFS= read -r -d '' FILE; do
+  RESP=$(git diff "${DIFF_ARGS[@]}" -- "$FILE" | gemini $MODEL_FLAG -p "Review this diff for $FILE. Report bugs, security, performance only." -o text 2>"$ERR_CHUNK")
+  # Standard Gemini error handling per chunk
   # collect per-file findings
 done
-```
-
-For `--base main`:
-```bash
-git diff main...HEAD | gemini $MODEL_FLAG -p "<review prompt>" -o text 2>"$ERR"
+rm -f "$ERR_CHUNK"
 ```
 
 6. Parse findings into categories:
@@ -297,7 +307,7 @@ ANSWER=$(cat "$OUT"); rm -f "$OUT"
 MODEL=$(_resolve_model "ask" "codex")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 OUT=$(mktemp)
-{ echo "Context (current changes):"; git diff; echo ""; echo "Question: <prompt>"; } | \
+{ echo "Context (current changes):"; git diff HEAD; echo ""; echo "Question: <prompt>"; } | \
   codex exec --ephemeral -C "$PWD" $CODEX_PROFILE_FLAG $MODEL_FLAG \
   --output-last-message "$OUT" - 2>&1
 ANSWER=$(cat "$OUT"); rm -f "$OUT"
@@ -350,8 +360,9 @@ RESP=$(git diff | gemini $MODEL_FLAG -p "<prompt>" -o text 2>"$ERR")
 2. Verify we're in a git repository. If not → stop.
 3. Create an isolated worktree:
 ```bash
-BRANCH="arbiter/$(date +%s)"
-git worktree add "/tmp/$BRANCH" -b "$BRANCH" HEAD
+BRANCH="arbiter-$(date +%s)-$$"
+WORKTREE=$(mktemp -d "/tmp/arbiter-XXXXXX")
+git worktree add "$WORKTREE" -b "$BRANCH" HEAD
 ```
 4. Show effective command, then execute:
 
@@ -359,21 +370,31 @@ git worktree add "/tmp/$BRANCH" -b "$BRANCH" HEAD
 ```bash
 MODEL=$(_resolve_model "implement" "codex")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
-codex exec --full-auto -C "/tmp/$BRANCH" $MODEL_FLAG "<spec>" 2>&1
+codex exec --full-auto -C "$WORKTREE" $MODEL_FLAG "<spec>" 2>&1
 ```
 
 **Gemini (--via gemini):**
 ```bash
 MODEL=$(_resolve_model "implement" "gemini")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
+ERR=$(mktemp)
 # IMPORTANT: subshell to avoid changing Claude's CWD
-(cd "/tmp/$BRANCH" && gemini $MODEL_FLAG -p "<spec>" -y -o text 2>/dev/null)
+(cd "$WORKTREE" && gemini $MODEL_FLAG -p "<spec>" -y -o text 2>"$ERR")
+GEMINI_EXIT=$?
+if [ $GEMINI_EXIT -ne 0 ]; then
+  if grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then
+    echo "GEMINI_ERROR: auth — run: gemini login"
+  else
+    echo "GEMINI_ERROR: exit $GEMINI_EXIT"; cat "$ERR"
+  fi
+fi
+rm -f "$ERR"
 ```
 
 5. Capture output and check exit code.
 6. Show the diff:
 ```bash
-git -C "/tmp/$BRANCH" diff HEAD
+git -C "$WORKTREE" diff HEAD
 ```
 7. Present results:
 ```
@@ -395,13 +416,13 @@ git -C "/tmp/$BRANCH" diff HEAD
 ```
 8. If merge:
 ```bash
-git -C "/tmp/$BRANCH" add -A && git -C "/tmp/$BRANCH" commit -m "arbiter: <spec summary>"
+git -C "$WORKTREE" add -A && git -C "$WORKTREE" commit -m "arbiter: <spec summary>"
 git merge "$BRANCH"
-git worktree remove "/tmp/$BRANCH"
+git worktree remove "$WORKTREE"
 ```
 9. If discard:
 ```bash
-git worktree remove --force "/tmp/$BRANCH"
+git worktree remove --force "$WORKTREE"
 git branch -D "$BRANCH"
 ```
 10. On ANY error, always clean up worktree. Remind user: `git worktree list | grep arbiter/` for manual cleanup.
@@ -477,7 +498,7 @@ Quorum always runs both providers. No `--via` flag.
 
 1. Build context:
    - Always: the question/proposal text
-   - If `--with-diff`: prepend `git diff` output
+   - If `--with-diff`: prepend `git diff HEAD` output (includes staged changes)
    - State snapshot: `git status --short` + `git log --oneline -3` (equalize context across providers)
 2. Contract prompt sent to BOTH providers:
    ```
@@ -505,7 +526,7 @@ MODEL=$(_resolve_model "review" "codex")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 OUT=$(mktemp) || { echo "CODEX_ERROR: cannot create temp file"; exit 1; }
 CONTEXT=""
-# If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
+# If --with-diff: CONTEXT="Context (current changes):\n$(git diff HEAD)\n\n"
 STATE="State:\n$(git status --short)\n$(git log --oneline -3)\n\n"
 PROMPT="${CONTEXT}${STATE}<contract_prompt>\n\n---\n\n<question>"
 echo "$PROMPT" | codex exec --ephemeral -C "$PWD" $CODEX_PROFILE_FLAG $MODEL_FLAG \
@@ -519,7 +540,7 @@ cat "$OUT"; rm -f "$OUT"
 MODEL=$(_resolve_model "review" "gemini")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 CONTEXT=""
-# If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
+# If --with-diff: CONTEXT="Context (current changes):\n$(git diff HEAD)\n\n"
 STATE="State:\n$(git status --short)\n$(git log --oneline -3)\n\n"
 PROMPT="${CONTEXT}${STATE}<contract_prompt>\n\n---\n\n<question>"
 ERR=$(mktemp)
@@ -558,11 +579,10 @@ Claude sees both responses (including their confidence scores) and applies deter
 6. One APPROVE + NEEDS_INFO → final NEEDS_INFO
 7. One valid + one failed → present single result with degraded quorum warning
 
-**For split decisions (case 4) — confidence-weighted resolution:**
-Instead of simple tiebreaker, apply confidence weighting first:
-- If the BLOCK provider has confidence ≥ 0.8 AND the APPROVE provider has confidence < 0.5 → final **BLOCK** (high-confidence BLOCK overrides low-confidence APPROVE)
-- If the APPROVE provider has confidence ≥ 0.8 AND the BLOCK provider has confidence < 0.5 → final **APPROVE** (high-confidence APPROVE overrides low-confidence BLOCK)
-- Otherwise (both confident, or both uncertain) → **Claude = tiebreaker** with adversarial prompt
+**For split decisions (case 4) — conservative resolution:**
+A BLOCK is a safety signal — confidence weighting must not auto-override it:
+- If the BLOCK provider has confidence ≥ 0.8 → final **BLOCK** (high-confidence BLOCK is authoritative)
+- Otherwise → **Claude = tiebreaker** with adversarial prompt (BLOCK can only be overridden after explicit adversarial analysis, never by confidence score alone)
 
 When Claude acts as tiebreaker, use adversarial prompt enriched with confidence context: "The providers disagree. Codex: <VERDICT> (confidence: <score>). Gemini: <VERDICT> (confidence: <score>). Your job: first, state the strongest case FOR the BLOCK. Then state the strongest case AGAINST it. Consider that the <higher-confidence provider> is more certain about their assessment. Only then give your tiebreaker verdict with rationale."
 This mitigates confirmation bias by forcing devil's advocate while surfacing confidence asymmetry.
@@ -593,20 +613,7 @@ This mitigates confirmation bias by forcing devil's advocate while surfacing con
 
 #### Logging
 
-Append to `~/vicc/state/quorum-log.md` conditionally (if dir exists):
-```bash
-if [ -d ~/vicc/state ]; then
-cat >> ~/vicc/state/quorum-log.md << EOF
-
-## <timestamp>
-
-**Question:** <first 3 lines>
-**Result:** BLOCKED (1 BLOCK, 1 APPROVE — confidence-weighted: Codex BLOCK@0.85 overrides Gemini APPROVE@0.40)
-**Votes:** Codex=BLOCK(0.85) Gemini=APPROVE(0.40)
-**Source:** arbiter quorum
-EOF
-fi
-```
+Quorum does not persist any data to disk. Prompt content and verdicts remain in the conversation context only. This is consistent with Arbiter's trust boundary: "No data is stored by Arbiter."
 
 ---
 
@@ -629,7 +636,7 @@ MODEL=$(_resolve_model "review" "codex")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 OUT=$(mktemp) || { echo "CODEX_ERROR: cannot create temp file"; exit 1; }
 CONTEXT=""
-# If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
+# If --with-diff: CONTEXT="Context (current changes):\n$(git diff HEAD)\n\n"
 codex exec --ephemeral -C "$PWD" $CODEX_PROFILE_FLAG $MODEL_FLAG \
   --output-last-message "$OUT" "<prompt>" 2>&1
 echo "---CODEX_ANSWER---"
@@ -641,7 +648,7 @@ cat "$OUT"; rm -f "$OUT"
 MODEL=$(_resolve_model "review" "gemini")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 CONTEXT=""
-# If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
+# If --with-diff: CONTEXT="Context (current changes):\n$(git diff HEAD)\n\n"
 ERR=$(mktemp)
 RESP=$(gemini $MODEL_FLAG -p "${CONTEXT}<prompt>" -o text 2>"$ERR")
 EXIT=$?
@@ -769,20 +776,7 @@ Thresholds:
 
 #### Logging
 
-Same pattern as quorum — append to `~/vicc/state/quorum-log.md` conditionally (if dir exists):
-```bash
-if [ -d ~/vicc/state ]; then
-cat >> ~/vicc/state/quorum-log.md << EOF
-
-## <timestamp>
-
-**Question:** <first 3 lines>
-**Result:** <confidence> (X verified, Y contested, Z rejected)
-**Rounds:** <2 or 3>
-**Source:** arbiter verify
-EOF
-fi
-```
+Verify does not persist any data to disk. Same policy as quorum — no data stored.
 
 ---
 
@@ -819,6 +813,7 @@ Note: Gemini sessions are CWD-scoped.
 CLAUDE_BIN=$(which claude 2>/dev/null) && CLAUDE_VER=$(claude --version 2>&1 | head -1)
 CODEX_BIN=$(which codex 2>/dev/null) && CODEX_VER=$(codex --version 2>&1 | head -1)
 GEMINI_BIN=$(which gemini 2>/dev/null) && GEMINI_VER=$(gemini --version 2>&1 | head -1)
+JQ_BIN=$(which jq 2>/dev/null) && JQ_VER=$(jq --version 2>&1 | head -1)
 ```
 
 2. **Smoke API tests** (parallel, background — three Bash calls with `run_in_background: true`). Note: do NOT use `timeout` command (unavailable on macOS). Use Bash tool's built-in timeout parameter instead:
@@ -910,6 +905,7 @@ Arbiter Doctor — Health Check
 | Codex    | ✓ found    | 0.104   | gpt-5.3-codex | ✓ ok   | 2.3s    |
 | Gemini   | ✓ found    | 0.30    | auto-gemini-3 | ✗ auth | —       |
 
+Tools: jq (<version>|missing — required for diverge scoring)
 Config: ~/.claude/emporium-providers.local.md (found|not found)
 
 Issues:
@@ -1155,9 +1151,17 @@ MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 PROMPT_FILE="${WT[B]}/.dev/diverge-prompt.md"
 ERR="$RUN_DIR/codex-stderr.log"
 
+# Guard against ARG_MAX — if prompt exceeds 128KB, reference the file instead
+PROMPT_SIZE=$(wc -c < "$PROMPT_FILE")
+if [ "$PROMPT_SIZE" -gt 131072 ]; then
+  CODEX_PROMPT="Read and follow the implementation spec in .dev/diverge-prompt.md"
+else
+  CODEX_PROMPT=$(cat "$PROMPT_FILE")
+fi
+
 run_with_timeout "$TIMEOUT" \
   codex exec --full-auto -C "${WT[B]}" $MODEL_FLAG \
-    "$(cat "$PROMPT_FILE")" \
+    "$CODEX_PROMPT" \
   >"$RUN_DIR/codex-stdout.log" 2>"$ERR"
 CODEX_EXIT=$?
 
@@ -1184,14 +1188,11 @@ MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 PROMPT_FILE="${WT[C]}/.dev/diverge-prompt.md"
 ERR="$RUN_DIR/gemini-stderr.log"
 
-# Load prompt into variable first — single quotes block expansion
-PROMPT=$(cat "$PROMPT_FILE")
-
+# Pipe prompt via stdin to avoid ARG_MAX / env size limits
 run_with_timeout "$TIMEOUT" \
-  sh -c "cd '${WT[C]}' && gemini $MODEL_FLAG -p \"\$DIVERGE_PROMPT\" -y -o text" \
+  sh -c "cd '${WT[C]}' && cat '$PROMPT_FILE' | gemini $MODEL_FLAG -y -o text" \
   >"$RUN_DIR/gemini-stdout.log" 2>"$ERR"
 GEMINI_EXIT=$?
-# Alternative: export DIVERGE_PROMPT="$PROMPT" before the run_with_timeout call
 
 if [ $GEMINI_EXIT -ne 0 ]; then
   if grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then
@@ -1268,16 +1269,24 @@ git -C "${WT[$SELECTED]}" diff "$BASE_COMMIT"
 Before running tests, verify a test suite exists:
 
 ```bash
-# Check HAS_TESTS — look for common test runner configs
+# Detect test runner and set TEST_COMMAND
 HAS_TESTS=false
-for RUNNER in pytest jest go npm; do
-  if command -v "$RUNNER" &>/dev/null; then HAS_TESTS=true; break; fi
-done
-# Also check for test files
-if ls tests/ &>/dev/null || ls test/ &>/dev/null; then HAS_TESTS=true; fi
+TEST_COMMAND=""
+if [ -f "package.json" ] && command -v npm &>/dev/null; then
+  HAS_TESTS=true; TEST_COMMAND="npm test"
+elif [ -f "pytest.ini" ] || [ -f "setup.cfg" ] || [ -f "pyproject.toml" ] && command -v pytest &>/dev/null; then
+  HAS_TESTS=true; TEST_COMMAND="pytest"
+elif [ -f "go.mod" ] && command -v go &>/dev/null; then
+  HAS_TESTS=true; TEST_COMMAND="go test ./..."
+elif ls tests/ &>/dev/null || ls test/ &>/dev/null; then
+  # Test files exist but no runner detected
+  if command -v pytest &>/dev/null; then HAS_TESTS=true; TEST_COMMAND="pytest"
+  elif command -v jest &>/dev/null; then HAS_TESTS=true; TEST_COMMAND="jest"
+  fi
+fi
 ```
 
-If `HAS_TESTS=false` → mark `Tests: not run` in decision matrix (do not error).
+If `HAS_TESTS=false` or `TEST_COMMAND` is empty → mark `Tests: not run` in decision matrix (do not error).
 
 If test suite found:
 
@@ -1323,13 +1332,13 @@ The evaluator produces raw scores per criterion. **Weighted totals are computed 
 #          backward_compat=3, performance=2, security=5
 WEIGHTS=(5 3 4 4 3 2 5)
 
-for SOL in 1 2 3; do
+for SOL in 0 1 2; do
   TOTAL=0
   for i in "${!WEIGHTS[@]}"; do
     SCORE=$(jq -r ".solutions[$SOL].scores[$i]" "$RUN_DIR/evaluator-output.json")
     TOTAL=$((TOTAL + WEIGHTS[i] * SCORE))
   done
-  echo "Solution $SOL: $TOTAL"
+  echo "Solution $((SOL + 1)): $TOTAL"
 done
 ```
 
@@ -1414,6 +1423,10 @@ git merge --no-ff "$SELECTED_BRANCH"
 ```
 
 Save report to `.dev/diverge-report.md` for audit trail. Append selection metadata.
+
+```bash
+mkdir -p .dev
+```
 
 Append JSONL metrics artifact (append-only, per-run stats):
 ```bash
@@ -1549,7 +1562,7 @@ Before every provider call, show the effective command:
 1. **Binary not found** → "<provider> not found in PATH. Install: <url>"
    - codex: https://github.com/openai/codex
    - gemini: https://github.com/google-gemini/gemini-cli
-2. **Auth error** → parse stderr for auth keywords (auth, login, 403, 401, credentials). Message: "Run `codex login` / `gemini login`"
+2. **Auth error** → parse stderr for auth keywords (auth, login, 403, 401, credentials). Message: "Run `codex auth` / `gemini login`"
 3. **Timeout** → 120s per provider. Kill and report partial output with `[TIMEOUT]` marker.
 4. **No changes for review** → check `git diff --stat` first, stop early.
 5. **Large diff** → if >300 lines, MUST chunk by file for gemini (codex handles natively).
