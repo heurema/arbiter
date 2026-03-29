@@ -1330,13 +1330,13 @@ The evaluator produces raw scores per criterion. **Weighted totals are computed 
 #          backward_compat=3, performance=2, security=5
 WEIGHTS=(5 3 4 4 3 2 5)
 
-for SOL in 1 2 3; do
+for SOL in 0 1 2; do
   TOTAL=0
   for i in "${!WEIGHTS[@]}"; do
     SCORE=$(jq -r ".solutions[$SOL].scores[$i]" "$RUN_DIR/evaluator-output.json")
     TOTAL=$((TOTAL + WEIGHTS[i] * SCORE))
   done
-  echo "Solution $SOL: $TOTAL"
+  echo "Solution $((SOL + 1)): $TOTAL"
 done
 ```
 
