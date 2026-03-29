@@ -1,11 +1,16 @@
-## [0.4.0] - 2026-03-18
-
 # Changelog
 
 All notable changes to this project will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.4.1] - 2026-03-29
+
+### Fixed
+- Make codex profile optional via `ARBITER_CODEX_PROFILE` env var — hardcoded `-p fast` caused silent failures when profile not configured
+
+## [0.4.0] - 2026-03-18
 
 ### Added
 - Configurable Claude model routing for diverge implementation and evaluator stages
