@@ -56,7 +56,7 @@ User → /arbiter <mode> [args]
 
 For `panel`, both calls are dispatched simultaneously using `run_in_background: true`. The skill waits for both to complete before rendering the comparison table.
 
-For `quorum`, there are two rounds. Round 1: independent votes. Round 2: each provider sees the other's vote and may revise. Claude then applies the deterministic policy (unanimous APPROVE → go; any BLOCK → no-go; NEEDS_INFO → escalate) with an adversarial tiebreaker for split votes.
+For `quorum`, providers vote independently in a single round. Claude then applies the deterministic policy (unanimous APPROVE → go; any high-confidence BLOCK → no-go; NEEDS_INFO → escalate) with an adversarial tiebreaker for split votes where the BLOCK confidence is below threshold.
 
 For `verify`, there are three rounds: independent answers, claim comparison to identify contested points, and adversarial cross-check where each provider challenges the other's contested claims. Output is per-claim verdicts.
 
