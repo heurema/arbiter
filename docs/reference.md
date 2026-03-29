@@ -7,7 +7,7 @@
 Sends the current git diff to an external AI for an independent code review. Codex is the default provider. Pass the diff to Gemini instead by piping.
 
 **Options**
-- `--gemini` — use Gemini CLI instead of Codex
+- `--via gemini` — use Gemini CLI instead of Codex
 - `--with-diff` — always include diff even if the provider already sees it from context (useful for `ask`)
 
 **Output**
@@ -16,7 +16,7 @@ A structured review with: Summary, Issues (severity: critical/major/minor), Sugg
 **Example**
 ```
 /arbiter review
-/arbiter review --gemini
+/arbiter review --via gemini
 ```
 
 ---
@@ -259,7 +259,7 @@ Provider selection still follows these mode defaults:
 
 | Mode | Default provider | Alternate |
 |------|-----------------|-----------|
-| review | Codex | `--gemini` flag |
+| review | Codex | `--via gemini` flag |
 | ask | Codex | automatic (both for panel-style questions) |
 | implement | Codex | — |
 | panel | Both | — |
