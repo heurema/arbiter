@@ -813,6 +813,7 @@ Note: Gemini sessions are CWD-scoped.
 CLAUDE_BIN=$(which claude 2>/dev/null) && CLAUDE_VER=$(claude --version 2>&1 | head -1)
 CODEX_BIN=$(which codex 2>/dev/null) && CODEX_VER=$(codex --version 2>&1 | head -1)
 GEMINI_BIN=$(which gemini 2>/dev/null) && GEMINI_VER=$(gemini --version 2>&1 | head -1)
+JQ_BIN=$(which jq 2>/dev/null) && JQ_VER=$(jq --version 2>&1 | head -1)
 ```
 
 2. **Smoke API tests** (parallel, background — three Bash calls with `run_in_background: true`). Note: do NOT use `timeout` command (unavailable on macOS). Use Bash tool's built-in timeout parameter instead:
@@ -904,6 +905,7 @@ Arbiter Doctor — Health Check
 | Codex    | ✓ found    | 0.104   | gpt-5.3-codex | ✓ ok   | 2.3s    |
 | Gemini   | ✓ found    | 0.30    | auto-gemini-3 | ✗ auth | —       |
 
+Tools: jq (<version>|missing — required for diverge scoring)
 Config: ~/.claude/emporium-providers.local.md (found|not found)
 
 Issues:

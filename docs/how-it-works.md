@@ -2,11 +2,11 @@
 
 ## Overview
 
-Arbiter is a single-skill Claude Code plugin. The entire implementation lives in `arbiter/SKILL.md`, which Claude Code loads as a skill and executes as structured instructions. There is no separate daemon, server, or compiled binary. When you invoke `/arbiter <mode>`, Claude Code activates the skill, parses the mode and arguments, and orchestrates one or more external CLI calls.
+Arbiter is a single-skill Claude Code plugin. The entire implementation lives in `skills/arbiter/SKILL.md`, which Claude Code loads as a skill and executes as structured instructions. There is no separate daemon, server, or compiled binary. When you invoke `/arbiter <mode>`, Claude Code activates the skill, parses the mode and arguments, and orchestrates one or more external CLI calls.
 
 ## Components
 
-**arbiter/SKILL.md** — the skill file. Defines all eight modes, their invocation patterns, output schemas, error handling rules, and synthesis logic. This is the single source of truth for Arbiter's behavior.
+**skills/arbiter/SKILL.md** — the skill file. Defines all nine modes (review, ask, implement, panel, quorum, verify, continue, diverge, doctor), their invocation patterns, output schemas, error handling rules, and synthesis logic. This is the single source of truth for Arbiter's behavior.
 
 **Codex CLI** — external process invoked via shell. Used as the default provider for `review`, `ask`, `implement`, `quorum`, `verify`, `panel`, and as one of three agents in `diverge`. Codex receives the prepared prompt or diff and returns text on stdout.
 
