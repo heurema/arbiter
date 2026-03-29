@@ -374,8 +374,18 @@ codex exec --full-auto -C "/tmp/$BRANCH" $MODEL_FLAG "<spec>" 2>&1
 ```bash
 MODEL=$(_resolve_model "implement" "gemini")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
+ERR=$(mktemp)
 # IMPORTANT: subshell to avoid changing Claude's CWD
-(cd "/tmp/$BRANCH" && gemini $MODEL_FLAG -p "<spec>" -y -o text 2>/dev/null)
+(cd "/tmp/$BRANCH" && gemini $MODEL_FLAG -p "<spec>" -y -o text 2>"$ERR")
+GEMINI_EXIT=$?
+if [ $GEMINI_EXIT -ne 0 ]; then
+  if grep -qi "auth\|login\|403\|401\|credentials" "$ERR"; then
+    echo "GEMINI_ERROR: auth — run: gemini login"
+  else
+    echo "GEMINI_ERROR: exit $GEMINI_EXIT"; cat "$ERR"
+  fi
+fi
+rm -f "$ERR"
 ```
 
 5. Capture output and check exit code.
