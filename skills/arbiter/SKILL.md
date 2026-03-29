@@ -307,7 +307,7 @@ ANSWER=$(cat "$OUT"); rm -f "$OUT"
 MODEL=$(_resolve_model "ask" "codex")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 OUT=$(mktemp)
-{ echo "Context (current changes):"; git diff; echo ""; echo "Question: <prompt>"; } | \
+{ echo "Context (current changes):"; git diff HEAD; echo ""; echo "Question: <prompt>"; } | \
   codex exec --ephemeral -C "$PWD" $CODEX_PROFILE_FLAG $MODEL_FLAG \
   --output-last-message "$OUT" - 2>&1
 ANSWER=$(cat "$OUT"); rm -f "$OUT"
@@ -498,7 +498,7 @@ Quorum always runs both providers. No `--via` flag.
 
 1. Build context:
    - Always: the question/proposal text
-   - If `--with-diff`: prepend `git diff` output
+   - If `--with-diff`: prepend `git diff HEAD` output (includes staged changes)
    - State snapshot: `git status --short` + `git log --oneline -3` (equalize context across providers)
 2. Contract prompt sent to BOTH providers:
    ```
@@ -526,7 +526,7 @@ MODEL=$(_resolve_model "review" "codex")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 OUT=$(mktemp) || { echo "CODEX_ERROR: cannot create temp file"; exit 1; }
 CONTEXT=""
-# If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
+# If --with-diff: CONTEXT="Context (current changes):\n$(git diff HEAD)\n\n"
 STATE="State:\n$(git status --short)\n$(git log --oneline -3)\n\n"
 PROMPT="${CONTEXT}${STATE}<contract_prompt>\n\n---\n\n<question>"
 echo "$PROMPT" | codex exec --ephemeral -C "$PWD" $CODEX_PROFILE_FLAG $MODEL_FLAG \
@@ -540,7 +540,7 @@ cat "$OUT"; rm -f "$OUT"
 MODEL=$(_resolve_model "review" "gemini")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 CONTEXT=""
-# If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
+# If --with-diff: CONTEXT="Context (current changes):\n$(git diff HEAD)\n\n"
 STATE="State:\n$(git status --short)\n$(git log --oneline -3)\n\n"
 PROMPT="${CONTEXT}${STATE}<contract_prompt>\n\n---\n\n<question>"
 ERR=$(mktemp)
@@ -636,7 +636,7 @@ MODEL=$(_resolve_model "review" "codex")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 OUT=$(mktemp) || { echo "CODEX_ERROR: cannot create temp file"; exit 1; }
 CONTEXT=""
-# If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
+# If --with-diff: CONTEXT="Context (current changes):\n$(git diff HEAD)\n\n"
 codex exec --ephemeral -C "$PWD" $CODEX_PROFILE_FLAG $MODEL_FLAG \
   --output-last-message "$OUT" "<prompt>" 2>&1
 echo "---CODEX_ANSWER---"
@@ -648,7 +648,7 @@ cat "$OUT"; rm -f "$OUT"
 MODEL=$(_resolve_model "review" "gemini")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 CONTEXT=""
-# If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
+# If --with-diff: CONTEXT="Context (current changes):\n$(git diff HEAD)\n\n"
 ERR=$(mktemp)
 RESP=$(gemini $MODEL_FLAG -p "${CONTEXT}<prompt>" -o text 2>"$ERR")
 EXIT=$?
