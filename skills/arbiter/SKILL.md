@@ -25,7 +25,7 @@ description: Multi-AI orchestrator — dispatch to Codex CLI and Gemini CLI for 
 
 | Mode | Codex Command | Gemini Command | Default |
 |------|--------------|----------------|---------|
-| ask | `codex exec --ephemeral -C "$PWD" -p fast --output-last-message "$OUT" "<prompt>"` | `gemini -p "<prompt>" -o text` | codex |
+| ask | `codex exec --ephemeral -C "$PWD" $CODEX_PROFILE_FLAG --output-last-message "$OUT" "<prompt>"` | `gemini -p "<prompt>" -o text` | codex |
 | review | `codex review [flags]` | `git diff \| gemini -p "<review_prompt>" -o text` | codex |
 | implement | `codex exec --full-auto -C "<worktree>" "<spec>"` | `(cd "<worktree>" && gemini -p "<spec>" -y -o text)` | codex |
 | continue | Not supported in v1 | `gemini -r latest -p "<follow-up>" -o text` | gemini |
@@ -117,13 +117,22 @@ MODEL_FLAG=""
 [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 ```
 
+### Codex Profile Resolution
+
+Codex `-p` (profile) is optional. If `ARBITER_CODEX_PROFILE` is set, it is passed to all `codex exec` calls. If unset, codex uses its default profile.
+
+```bash
+CODEX_PROFILE_FLAG=""
+[ -n "${ARBITER_CODEX_PROFILE:-}" ] && CODEX_PROFILE_FLAG="-p $ARBITER_CODEX_PROFILE"
+```
+
 NOTE: This version passes task/provider as sys.argv instead of bash string interpolation (addresses the security concern from signum code review).
 
 For Gemini CLI, verified headless model strings in this environment are `auto-gemini-3`, `gemini-3.1-pro-preview`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `pro`, and `flash`. If Gemini 3 preview is not enabled for the account, fall back to `pro` / `flash` or `gemini-2.5-*`.
 
 ### Capability Notes
 - **Claude Code CLI** supports `--model` with aliases like `haiku`, `sonnet`, and `opus`. For nested Claude CLI calls, always sanitize the environment first: `env -u ANTHROPIC_API_KEY -u CLAUDECODE claude ...` so subscription auth is not shadowed by an unrelated API-key env var.
-- **Codex** uses `-p` for profiles (fast, default, full). `-c model_reasoning_effort=high` for reasoning override.
+- **Codex** uses `-p` for profiles (fast, default, full). Profile is optional — set `ARBITER_CODEX_PROFILE` env var to enable. `-c model_reasoning_effort=high` for reasoning override.
 - **Gemini** uses `-o text` always (not `-o json` — that wraps in transport envelope). `-y` for auto-accept in implement.
 - **Gemini** model IDs should be passed via `--model`. For Gemini 3 routing, prefer verified headless strings like `auto-gemini-3`, `gemini-3.1-pro-preview`, and `gemini-3-flash-preview`. Use `pro` / `flash` or `gemini-2.5-*` as fallback when preview access is unavailable.
 - **Codex review** outputs plain text, never JSON. Always parse as human-readable.
@@ -278,7 +287,7 @@ X issues found. Style issues filtered out.
 MODEL=$(_resolve_model "ask" "codex")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 OUT=$(mktemp) || { echo "Cannot create temp file"; return 1; }
-codex exec --ephemeral -C "$PWD" -p "${PROFILE:-fast}" $MODEL_FLAG \
+codex exec --ephemeral -C "$PWD" $CODEX_PROFILE_FLAG $MODEL_FLAG \
   --output-last-message "$OUT" "<prompt>" 2>&1
 ANSWER=$(cat "$OUT"); rm -f "$OUT"
 ```
@@ -289,7 +298,7 @@ MODEL=$(_resolve_model "ask" "codex")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 OUT=$(mktemp)
 { echo "Context (current changes):"; git diff; echo ""; echo "Question: <prompt>"; } | \
-  codex exec --ephemeral -C "$PWD" -p fast $MODEL_FLAG \
+  codex exec --ephemeral -C "$PWD" $CODEX_PROFILE_FLAG $MODEL_FLAG \
   --output-last-message "$OUT" - 2>&1
 ANSWER=$(cat "$OUT"); rm -f "$OUT"
 ```
@@ -415,7 +424,7 @@ git branch -D "$BRANCH"
 MODEL=$(_resolve_model "ask" "codex")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 OUT=$(mktemp)
-codex exec --ephemeral -C "$PWD" -p fast $MODEL_FLAG --output-last-message "$OUT" "<prompt>" 2>&1
+codex exec --ephemeral -C "$PWD" $CODEX_PROFILE_FLAG $MODEL_FLAG --output-last-message "$OUT" "<prompt>" 2>&1
 echo "---CODEX_ANSWER---"
 cat "$OUT"; rm -f "$OUT"
 ```
@@ -499,7 +508,7 @@ CONTEXT=""
 # If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
 STATE="State:\n$(git status --short)\n$(git log --oneline -3)\n\n"
 PROMPT="${CONTEXT}${STATE}<contract_prompt>\n\n---\n\n<question>"
-echo "$PROMPT" | codex exec --ephemeral -C "$PWD" -p fast $MODEL_FLAG \
+echo "$PROMPT" | codex exec --ephemeral -C "$PWD" $CODEX_PROFILE_FLAG $MODEL_FLAG \
   --output-last-message "$OUT" - 2>&1
 echo "---CODEX_ANSWER---"
 cat "$OUT"; rm -f "$OUT"
@@ -621,7 +630,7 @@ MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 OUT=$(mktemp) || { echo "CODEX_ERROR: cannot create temp file"; exit 1; }
 CONTEXT=""
 # If --with-diff: CONTEXT="Context (current changes):\n$(git diff)\n\n"
-codex exec --ephemeral -C "$PWD" -p fast $MODEL_FLAG \
+codex exec --ephemeral -C "$PWD" $CODEX_PROFILE_FLAG $MODEL_FLAG \
   --output-last-message "$OUT" "<prompt>" 2>&1
 echo "---CODEX_ANSWER---"
 cat "$OUT"; rm -f "$OUT"
@@ -695,7 +704,7 @@ Two Bash calls with `run_in_background: true`:
 MODEL=$(_resolve_model "review" "codex")
 MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 OUT=$(mktemp) || { echo "CODEX_ERROR: cannot create temp file"; exit 1; }
-echo "$ADVERSARIAL_PROMPT" | codex exec --ephemeral -C "$PWD" -p fast $MODEL_FLAG \
+echo "$ADVERSARIAL_PROMPT" | codex exec --ephemeral -C "$PWD" $CODEX_PROFILE_FLAG $MODEL_FLAG \
   --output-last-message "$OUT" - 2>&1
 echo "---CODEX_VERIFY---"
 cat "$OUT"; rm -f "$OUT"
@@ -846,7 +855,7 @@ CODEX_MODEL=$(_resolve_model "doctor" "codex")
 CODEX_MODEL_FLAG=""; [ -n "$CODEX_MODEL" ] && CODEX_MODEL_FLAG="--model $CODEX_MODEL"
 OUT=$(mktemp); ERR=$(mktemp)
 START=$(date +%s)
-codex exec --ephemeral -p fast $CODEX_MODEL_FLAG \
+codex exec --ephemeral $CODEX_PROFILE_FLAG $CODEX_MODEL_FLAG \
   --output-last-message "$OUT" "Reply with exactly: ARBITER_HEALTH_OK" 2>"$ERR"
 CODEX_API_EXIT=$?
 CODEX_LATENCY=$(( $(date +%s) - START ))
