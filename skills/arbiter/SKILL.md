@@ -1146,9 +1146,17 @@ MODEL_FLAG=""; [ -n "$MODEL" ] && MODEL_FLAG="--model $MODEL"
 PROMPT_FILE="${WT[B]}/.dev/diverge-prompt.md"
 ERR="$RUN_DIR/codex-stderr.log"
 
+# Guard against ARG_MAX — if prompt exceeds 128KB, reference the file instead
+PROMPT_SIZE=$(wc -c < "$PROMPT_FILE")
+if [ "$PROMPT_SIZE" -gt 131072 ]; then
+  CODEX_PROMPT="Read and follow the implementation spec in .dev/diverge-prompt.md"
+else
+  CODEX_PROMPT=$(cat "$PROMPT_FILE")
+fi
+
 run_with_timeout "$TIMEOUT" \
   codex exec --full-auto -C "${WT[B]}" $MODEL_FLAG \
-    "$(cat "$PROMPT_FILE")" \
+    "$CODEX_PROMPT" \
   >"$RUN_DIR/codex-stdout.log" 2>"$ERR"
 CODEX_EXIT=$?
 
